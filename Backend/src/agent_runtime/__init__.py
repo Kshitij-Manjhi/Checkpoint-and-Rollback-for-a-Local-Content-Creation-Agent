@@ -10,3 +10,6 @@ __all__ = [
     "RestoreResult",
     "SnapshotIntegrityError",
 ]
+
+from .failure_simulator import assess_candidate, SCENARIOS
+from .evaluation import run_experiment
