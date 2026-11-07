@@ -9,3 +9,5 @@ venv/
 *.sqlite3-wal
 # Legacy terminal demo runtime output
 demo_data/
+
+runtime_data/

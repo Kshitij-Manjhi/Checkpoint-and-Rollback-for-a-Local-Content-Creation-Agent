@@ -110,3 +110,15 @@ They do not establish real-world policy detection accuracy, semantic quality,
 tamper-proof auditability, deterministic LLM replay, or production resilience.
 Record machine, OS, Python version, storage medium, repetitions, and commit hash
 when collecting results for the final evaluation report.
+
+
+## Terminal content-agent entry points
+
+The standalone terminal entry points use descriptive filenames:
+
+- `python content_agent.py` — local content workflow with simulated content generation.
+- `python ollama_content_agent.py` — local content workflow connected to Ollama (`qwen3:4b` by default).
+
+Both write local state under `runtime_data/`. These standalone entry points are
+kept separate from the tested modular checkpoint and evaluation engine in
+`src/agent_runtime/`; their simple rule checks are not a production safety evaluator.
