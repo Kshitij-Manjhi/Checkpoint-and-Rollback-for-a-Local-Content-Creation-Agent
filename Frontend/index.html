@@ -1,44 +1,99 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f8fafc"><title>DraftGuard · Content workspace</title>
-  <link rel="stylesheet" href="./styles.css"><script defer src="./config.js"></script><script defer src="./app.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f6f2">
+  <meta name="description" content="A local-first writing studio with safe checkpoints and human review.">
+  <title>DraftGuard — Writing studio</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script defer src="./config.js"></script>
+  <script defer src="./app.js"></script>
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
-      <a class="brand" href="#create" aria-label="DraftGuard home"><span class="brand-icon">D</span><span><strong>DraftGuard</strong><small>Responsible content</small></span></a>
-      <div class="nav-label">WORKSPACE</div>
-      <nav id="mainNav" aria-label="Main navigation">
-        <button class="nav-item active" data-view="create"><span class="nav-icon">✎</span>Create draft</button>
-        <button class="nav-item" data-view="history"><span class="nav-icon">◷</span>History</button>
-        <button class="nav-item" data-view="checkpoints"><span class="nav-icon">⎇</span>Checkpoints</button>
-        <button class="nav-item" data-view="insights"><span class="nav-icon">▥</span>Insights & audit</button>
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#create" aria-label="DraftGuard home">
+        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 5.5h10.5L25 12v14.5H8z"/><path d="M18 5.5V12h7M12 17h9M12 21h6"/></svg></span>
+        <span class="brand-copy"><strong>draftguard</strong><small>Writing, with a safety net.</small></span>
+      </a>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav id="mainNav" class="main-nav" aria-label="Main navigation">
+        <button class="nav-item active" data-view="create"><span class="nav-glyph">✳</span><span>Writing studio</span><kbd>⌘ 1</kbd></button>
+        <button class="nav-item" data-view="history"><span class="nav-glyph">◷</span><span>Recent drafts</span></button>
+        <button class="nav-item" data-view="checkpoints"><span class="nav-glyph">⤺</span><span>Versions & recovery</span></button>
+        <button class="nav-item" data-view="insights"><span class="nav-glyph">⌁</span><span>Audit & evaluation</span></button>
       </nav>
-      <div class="sidebar-bottom"><span class="privacy-icon">♧</span><div><strong>Local-first workspace</strong><p>Your prompts and drafts are handled by your local backend.</p></div></div>
-      <div class="api-status"><span id="healthDot" class="status-dot"></span><span id="healthText">Connecting to backend…</span></div>
+      <div class="sidebar-spacer"></div>
+      <div class="privacy-card">
+        <span class="privacy-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 6v5c0 4.5-2.8 8-7 10-4.2-2-7-5.5-7-10V6z"/><path d="m9 12 2 2 4-4"/></svg></span>
+        <div><strong>Private by design</strong><p>Your writing stays on this machine and uses your local backend.</p></div>
+      </div>
+      <div class="connection-row"><span id="healthDot" class="status-dot"></span><span id="healthText">Connecting to local runtime…</span><span class="connection-pulse"></span></div>
+      <div class="sidebar-foot"><span class="mini-avatar">DG</span><span><strong>Local workspace</strong><small>Research prototype</small></span><span class="local-lock">⌑</span></div>
     </aside>
+
     <main class="main-area">
-      <header class="topbar"><div><div class="eyebrow">YOUR WRITING WORKSPACE</div><h1 id="pageTitle">Create something great.</h1></div><div class="top-actions"><span class="local-pill"><span></span> Local runtime</span><button id="newTaskTop" class="button button-secondary">＋ New draft</button></div></header>
+      <header class="topbar">
+        <div class="mobile-brand"><button id="mobileMenu" class="icon-button mobile-menu" type="button" aria-label="Open navigation">☰</button><span class="brand-mark small-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M8 5.5h10.5L25 12v14.5H8z"/><path d="M18 5.5V12h7M12 17h9M12 21h6"/></svg></span></div>
+        <div class="breadcrumbs"><span>Workspace</span><span class="crumb-slash">/</span><strong id="pageTitle">Writing studio</strong></div>
+        <div class="topbar-actions"><span class="runtime-chip"><span class="runtime-dot"></span> Local runtime</span><button id="newTaskTop" class="button button-quiet" type="button"><span class="button-plus">＋</span> New draft</button></div>
+      </header>
+
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
       <section id="view-create" class="view active-view">
-        <div class="intro"><div><h2>What would you like to create?</h2><p>Start with an idea. Refine it with feedback, while recovery safeguards work in the background.</p></div><div class="current-task" id="activeTask"><span class="task-dot"></span><span>No draft selected</span></div></div>
-        <div class="composer-card">
-          <form id="taskForm" class="task-create-row"><label for="taskTitle">Draft name</label><input id="taskTitle" maxlength="200" value="Untitled draft" required><button class="button button-secondary" type="submit">Create workspace</button></form>
-          <div class="prompt-area"><label for="prompt">Your instructions</label><textarea id="prompt" rows="5" maxlength="20000" placeholder="Describe the topic, intended audience, tone, format, and what a successful result should include…" required></textarea>
-            <div class="composer-footer"><div class="model-controls"><label for="mode">Generation</label><select id="mode"><option value="ollama">Local Ollama model</option><option value="no_llm">Template mode (no LLM)</option></select><label for="modelName" class="model-label">Model</label><select id="modelName" disabled><option value="">Discovering models…</option></select></div><button id="generateButton" class="button button-primary" type="submit" form="generateForm">✦ Generate draft</button></div>
-          </div>
-          <form id="generateForm" class="hidden-form"></form>
+        <div class="studio-heading">
+          <div><div class="eyebrow"><span class="eyebrow-line"></span> YOUR PRIVATE WRITING SPACE</div><h1>Make room for a <em>good idea.</em></h1><p class="heading-copy">Think it through, shape the words, and keep every important version within reach.</p></div>
+          <div class="active-task-card" id="activeTask"><span class="task-dot"></span><span>No draft selected</span></div>
         </div>
-        <section id="draftSection" class="draft-card"><div class="draft-header"><div><div class="eyebrow">WORKING DOCUMENT</div><h3>Your draft</h3></div><div id="draftStatus" class="status-pill neutral">Waiting for a prompt</div></div><textarea id="draftOutput" class="draft-output" placeholder="Your generated content will appear here…" spellcheck="true"></textarea><div class="draft-footer"><span id="draftMeta">Generate a draft to begin. The original version will be checkpointed automatically.</span><div class="draft-actions"><button id="copyDraft" class="button button-secondary" type="button" disabled>Copy text</button><button id="reviewDraft" class="button button-primary" type="button" disabled>Review draft</button></div></div></section>
-        <div class="quiet-note"><span>✦</span><p><strong>Quality protection is on.</strong> Drafts are checked and versioned. Human approval is required before a generated version becomes a safe recovery point.</p></div>
+
+        <div class="studio-grid">
+          <div class="writing-column">
+            <section class="paper-card composer-card">
+              <div class="paper-topline"><span class="step-label"><span>01</span> START WITH AN IDEA</span><span class="tiny-note">A clear brief makes a better first draft</span></div>
+              <form id="taskForm" class="task-create-row">
+                <label for="taskTitle">DRAFT NAME</label><input id="taskTitle" maxlength="200" value="Untitled draft" required aria-label="Draft name">
+                <button class="button button-outline" type="submit">Create workspace <span>↗</span></button>
+              </form>
+              <div class="field-divider"></div>
+              <div class="prompt-area"><label for="prompt" class="field-label">What are we working on?</label><p class="field-help">Describe the goal, audience, tone, and any must-have details.</p>
+                <textarea id="prompt" rows="5" maxlength="20000" placeholder="Write your brief here…&#10;&#10;For example: Explain how responsible AI checkpointing works to a technical audience. Keep it clear, practical, and under 500 words." required></textarea>
+                <div class="prompt-bottom"><span id="promptCount">0 / 20,000</span><div class="prompt-tip"><span>↵</span> Use a detailed brief for better results</div></div>
+              </div>
+              <div class="composer-bottom"><div class="generation-settings"><div class="setting-block"><label for="mode">GENERATION MODE</label><select id="mode"><option value="ollama">Local Ollama</option><option value="no_llm">Template mode</option></select></div><div class="setting-block model-setting"><label for="modelName">MODEL</label><select id="modelName" disabled><option value="">Discovering models…</option></select></div></div><button id="generateButton" class="button button-primary" type="submit" form="generateForm"><span class="sparkle">✳</span> Generate draft <span class="shortcut">Ctrl ↵</span></button></div>
+              <form id="generateForm" class="hidden-form"></form>
+            </section>
+
+            <section id="draftSection" class="paper-card draft-card">
+              <div class="draft-header"><div class="draft-title-group"><span class="step-label"><span>02</span> YOUR DOCUMENT</span><h2>Draft editor</h2></div><div id="draftStatus" class="status-pill neutral">Waiting for a prompt</div></div>
+              <div class="editor-toolbar"><span class="editor-mode"><span class="editor-dot"></span> Editable document</span><span class="editor-toolbar-right"><span id="wordCount">0 words</span><span class="toolbar-separator"></span><span>Autosave not enabled</span></span></div>
+              <textarea id="draftOutput" class="draft-output" placeholder="Your draft will appear here. You can edit the text before you submit it for human review." spellcheck="true" aria-label="Draft editor"></textarea>
+              <div class="draft-footer"><div class="draft-meta-wrap"><span class="draft-meta-icon">↳</span><span id="draftMeta">Your first version will be saved as a checkpoint when generated.</span></div><div class="draft-actions"><button id="copyDraft" class="button button-outline" type="button" disabled><span>▢</span> Copy</button><button id="reviewDraft" class="button button-primary" type="button" disabled><span>✓</span> Review version</button></div></div>
+            </section>
+            <div class="safety-note"><span class="safety-icon">✳</span><div><strong>Safety net is built in.</strong><span>Generated versions start pending. Human approval is required before a version becomes a trusted recovery point.</span></div><button type="button" class="text-link" data-go="checkpoints">How it works <span>↗</span></button></div>
+          </div>
+
+          <aside class="context-column" aria-label="Draft status and workflow">
+            <section class="side-card workflow-card"><div class="side-card-heading"><span class="side-icon">◈</span><span>WORKFLOW</span><span class="live-label">LIVE</span></div><h3>From idea to safe version.</h3><p class="side-description">Each generated draft passes through a simple, traceable workflow.</p>
+              <div class="workflow-steps"><div class="workflow-step current"><span class="workflow-number">1</span><div><strong>Create</strong><small>Describe what you need</small></div><span class="step-state">●</span></div><div class="workflow-connector"></div><div class="workflow-step"><span class="workflow-number">2</span><div><strong>Generate & check</strong><small>Run quality policy checks</small></div><span class="step-state">○</span></div><div class="workflow-connector"></div><div class="workflow-step"><span class="workflow-number">3</span><div><strong>Human review</strong><small>Approve or reject a version</small></div><span class="step-state">○</span></div><div class="workflow-connector"></div><div class="workflow-step"><span class="workflow-number">4</span><div><strong>Safe recovery</strong><small>Restore a verified checkpoint</small></div><span class="step-state">○</span></div></div>
+              <div class="workflow-foot"><span class="tiny-shield">⌑</span><span>Every review decision is recorded in the audit trail.</span></div>
+            </section>
+            <section class="side-card checkpoint-summary"><div class="side-card-heading"><span class="side-icon">⤺</span><span>CHECKPOINTS</span></div><div class="summary-stat"><strong id="sideCheckpointCount">—</strong><span>versions saved</span></div><div class="summary-progress"><span id="sideSafeProgress"></span></div><div class="summary-legend"><span><i class="legend-dot safe"></i> Safe to recover <strong id="sideSafeCount">—</strong></span><span><i class="legend-dot pending-dot"></i> Pending review <strong id="sidePendingCount">—</strong></span></div><button class="button button-quiet full-width" type="button" data-go="checkpoints">View version history <span>→</span></button></section>
+            <section class="quote-card"><span class="quote-mark">“</span><p>Good work deserves a safety net, not a single point of failure.</p><span class="quote-attribution">THE DRAFTGUARD PRINCIPLE</span></section>
+          </aside>
+        </div>
       </section>
-      <section id="view-history" class="view"><div class="section-intro"><h2>Your recent work</h2><p>Reopen a task to inspect its versions and continue working.</p></div><div class="panel"><form id="loadTaskForm" class="load-task-form"><label for="loadTaskId">Have a task ID?</label><input id="loadTaskId" placeholder="Paste a task ID"><button class="button button-secondary" type="submit">Open workspace</button></form><div id="historyContent" class="empty-state">Create a workspace to begin building your history.</div></div></section>
-      <section id="view-checkpoints" class="view"><div class="section-intro"><h2>Versions & recovery</h2><p>Review draft status and recover the latest verified safe version when needed.</p></div><div class="recovery-banner"><div class="recovery-icon">↶</div><div><strong>Recover without losing your safe version</strong><p>Rollback selects the latest verified safe checkpoint. Pending or rejected drafts are not eligible.</p></div><button id="rollbackButton" class="button button-danger" type="button" disabled>Recover safe version</button></div><div class="panel"><div class="panel-title-row"><div><h3>Checkpoint history</h3><p id="checkpointSubtitle">Select or create a workspace to view versions.</p></div><button id="refreshButton" class="button button-secondary" type="button">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Version</th><th>Review</th><th>Integrity</th><th>Recovery</th><th>Actions</th></tr></thead><tbody id="checkpointRows"><tr><td colspan="5" class="table-empty">No workspace selected.</td></tr></tbody></table></div></div></section>
-      <section id="view-insights" class="view"><div class="section-intro"><h2>Insights & audit</h2><p>Technical evidence for review, debugging, and project evaluation. Most writers won't need this every day.</p></div><div class="metric-grid"><div class="metric-card"><span>Checkpoints</span><strong id="metricCheckpoints">—</strong><small>Versions in current task</small></div><div class="metric-card"><span>Approved versions</span><strong id="metricApproved">—</strong><small>Human-approved checkpoints</small></div><div class="metric-card"><span>Safe recovery points</span><strong id="metricSafe">—</strong><small>Eligible versions</small></div></div><div class="panel"><div class="panel-title-row"><div><h3>Audit events</h3><p>Recorded generation, review, and recovery activity.</p></div><button id="eventsButton" class="button button-secondary" type="button">Load events</button></div><div id="eventsList" class="events-list empty-state">Select a workspace to load events.</div></div><div class="panel evaluation-panel"><div><h3>Runtime evaluation</h3><p>Run the deterministic recovery scenarios used by the research prototype.</p></div><div class="eval-controls"><label for="repetitions">Repetitions <input id="repetitions" type="number" min="1" max="100" value="3"></label><button id="runEvaluation" class="button button-secondary" type="button">Run evaluation</button></div><pre id="evaluationResult" class="evaluation-result">No evaluation run yet.</pre></div></section>
-      <footer><span>DraftGuard · Research prototype</span><span>Automated checks support review; they do not guarantee factual correctness.</span></footer>
+
+      <section id="view-history" class="view secondary-view"><div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> YOUR WORK</div><h1>Recent <em>drafts.</em></h1><p>Pick up where you left off. Task history is stored in this browser session.</p></div><div class="content-panel"><div class="panel-heading"><div><h2>Your workspaces</h2><p>Open a workspace by selecting it below or entering a task ID.</p></div><span class="panel-icon">◷</span></div><form id="loadTaskForm" class="load-task-form"><label for="loadTaskId">TASK ID</label><input id="loadTaskId" placeholder="Paste a task ID to open a workspace"><button class="button button-primary" type="submit">Open workspace <span>↗</span></button></form><div id="historyContent" class="empty-state">Create a workspace to begin building your history.</div></div></section>
+
+      <section id="view-checkpoints" class="view secondary-view"><div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> RECOVERABILITY</div><h1>Versions & <em>recovery.</em></h1><p>Inspect the history, verify integrity, and recover the latest safe checkpoint.</p></div><div class="recovery-banner"><div class="recovery-symbol">↶</div><div class="recovery-copy"><strong>Your safe version is protected.</strong><p>Recovery selects the latest verified safe checkpoint. Pending or rejected versions are not eligible.</p></div><button id="rollbackButton" class="button button-danger" type="button" disabled>Recover safe version <span>↶</span></button></div><div class="content-panel"><div class="panel-heading"><div><h2>Checkpoint history</h2><p id="checkpointSubtitle">Select or create a workspace to view versions.</p></div><button id="refreshButton" class="button button-outline" type="button">↻ Refresh</button></div><div class="table-wrap"><table><thead><tr><th>VERSION</th><th>HUMAN REVIEW</th><th>INTEGRITY</th><th>RECOVERY</th><th>ACTIONS</th></tr></thead><tbody id="checkpointRows"><tr><td colspan="5" class="table-empty">No workspace selected.</td></tr></tbody></table></div></div></section>
+
+      <section id="view-insights" class="view secondary-view"><div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> TRANSPARENCY</div><h1>Audit & <em>evaluation.</em></h1><p>Technical evidence for review and debugging. Metrics are prototype measurements, not safety guarantees.</p></div><div class="metric-grid"><div class="metric-card"><span class="metric-icon">▤</span><span>CHECKPOINTS</span><strong id="metricCheckpoints">—</strong><small>Versions in current task</small></div><div class="metric-card"><span class="metric-icon">✓</span><span>APPROVED</span><strong id="metricApproved">—</strong><small>Human-approved versions</small></div><div class="metric-card"><span class="metric-icon">⌑</span><span>SAFE RECOVERY</span><strong id="metricSafe">—</strong><small>Eligible checkpoints</small></div></div><div class="content-panel"><div class="panel-heading"><div><h2>Audit trail</h2><p>Recorded generation, review, and recovery activity.</p></div><button id="eventsButton" class="button button-outline" type="button">Load events ↻</button></div><div id="eventsList" class="events-list empty-state">Select a workspace to load events.</div></div><div class="content-panel evaluation-panel"><div class="panel-heading"><div><h2>Runtime evaluation</h2><p>Run the deterministic recovery scenarios used by this research prototype.</p></div><span class="panel-icon">⌁</span></div><div class="eval-controls"><label for="repetitions">REPETITIONS <input id="repetitions" type="number" min="1" max="100" value="3"></label><button id="runEvaluation" class="button button-primary" type="button">Run evaluation <span>↗</span></button></div><pre id="evaluationResult" class="evaluation-result">No evaluation run yet.</pre></div></section>
+      <footer class="app-footer"><span>DraftGuard <i>·</i> Responsible AI research prototype</span><span>Automated checks support review; they do not guarantee factual correctness.</span></footer>
     </main>
   </div>
-  <dialog id="reviewDialog"><form id="reviewForm" class="dialog-card"><div class="dialog-heading"><div><div class="eyebrow">HUMAN REVIEW</div><h3 id="reviewTitle">Review this draft</h3></div><button id="closeReview" type="button" class="icon-button" aria-label="Close dialog">×</button></div><p id="reviewDescription">Review the draft before approving it as a safe recovery point.</p><input id="reviewCheckpointId" type="hidden"><label for="reviewer">Reviewer</label><input id="reviewer" maxlength="120" value="reviewer-1" required><label for="reviewReason">Reason for this decision</label><textarea id="reviewReason" rows="3" minlength="3" maxlength="2000" required placeholder="Explain what you checked and why…"></textarea><div class="dialog-actions"><button id="cancelReview" type="button" class="button button-secondary">Cancel</button><button id="confirmReview" type="submit" class="button button-primary">Approve draft</button></div></form></dialog>
-</body></html>
+
+  <dialog id="reviewDialog" class="review-dialog"><form id="reviewForm" class="dialog-card"><div class="dialog-heading"><div><div class="eyebrow"><span class="eyebrow-line"></span> HUMAN REVIEW</div><h2 id="reviewTitle">Review this draft</h2></div><button id="closeReview" type="button" class="icon-button" aria-label="Close dialog">×</button></div><p id="reviewDescription">Review this version before approving it as a safe recovery point.</p><div class="review-principle"><span>⌑</span><span>Approval makes this checkpoint eligible for recovery. It does not guarantee factual correctness.</span></div><input id="reviewCheckpointId" type="hidden"><label for="reviewer">REVIEWER</label><input id="reviewer" maxlength="120" value="reviewer-1" required><label for="reviewReason">REASON FOR THIS DECISION</label><textarea id="reviewReason" rows="3" minlength="3" maxlength="2000" required placeholder="Explain what you checked and why…"></textarea><div class="dialog-actions"><button id="cancelReview" type="button" class="button button-outline">Cancel</button><button id="confirmReview" type="submit" class="button button-primary">Approve version</button></div></form></dialog>
+</body>
+</html>

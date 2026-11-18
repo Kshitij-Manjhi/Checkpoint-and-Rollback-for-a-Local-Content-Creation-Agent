@@ -1,6 +1,6 @@
 # DraftGuard Frontend
 
-This is a separate, lightweight frontend project. It talks to the FastAPI backend over HTTP; the UI is not served from the backend package.
+This is a separate, responsive minimal writing studio built with plain HTML, CSS, and JavaScript. No frontend package installation or build step is required. It talks to the FastAPI backend over HTTP; the UI is not served from the backend package.
 
 ## Run locally
 
@@ -21,4 +21,4 @@ This is a separate, lightweight frontend project. It talks to the FastAPI backen
 
 3. Open http://127.0.0.1:5500. The frontend calls http://127.0.0.1:8000. To change the backend URL, edit `config.js`.
 
-The backend allows CORS only for the expected localhost development origins. Keep both services bound to localhost. This is a research prototype: task title history is held in browser session memory/API process memory, reviewer names are not authenticated, and automated checks do not guarantee factual correctness.
+The interface includes a writing-first composer, word and prompt counters, local model selection, human review dialog, checkpoint inspection, rollback, and audit/evaluation views. The backend allows CORS only for the expected localhost development origins. Keep both services bound to localhost. This is a research prototype: task title history is held in browser session memory/API process memory, reviewer names are not authenticated, and automated checks do not guarantee factual correctness.
