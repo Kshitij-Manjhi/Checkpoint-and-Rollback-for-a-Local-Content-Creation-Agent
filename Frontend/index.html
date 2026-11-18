@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f8fafc"><title>DraftGuard · Content workspace</title>
+  <link rel="stylesheet" href="./styles.css"><script defer src="./config.js"></script><script defer src="./app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#create" aria-label="DraftGuard home"><span class="brand-icon">D</span><span><strong>DraftGuard</strong><small>Responsible content</small></span></a>
+      <div class="nav-label">WORKSPACE</div>
+      <nav id="mainNav" aria-label="Main navigation">
+        <button class="nav-item active" data-view="create"><span class="nav-icon">✎</span>Create draft</button>
+        <button class="nav-item" data-view="history"><span class="nav-icon">◷</span>History</button>
+        <button class="nav-item" data-view="checkpoints"><span class="nav-icon">⎇</span>Checkpoints</button>
+        <button class="nav-item" data-view="insights"><span class="nav-icon">▥</span>Insights & audit</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="privacy-icon">♧</span><div><strong>Local-first workspace</strong><p>Your prompts and drafts are handled by your local backend.</p></div></div>
+      <div class="api-status"><span id="healthDot" class="status-dot"></span><span id="healthText">Connecting to backend…</span></div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar"><div><div class="eyebrow">YOUR WRITING WORKSPACE</div><h1 id="pageTitle">Create something great.</h1></div><div class="top-actions"><span class="local-pill"><span></span> Local runtime</span><button id="newTaskTop" class="button button-secondary">＋ New draft</button></div></header>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section id="view-create" class="view active-view">
+        <div class="intro"><div><h2>What would you like to create?</h2><p>Start with an idea. Refine it with feedback, while recovery safeguards work in the background.</p></div><div class="current-task" id="activeTask"><span class="task-dot"></span><span>No draft selected</span></div></div>
+        <div class="composer-card">
+          <form id="taskForm" class="task-create-row"><label for="taskTitle">Draft name</label><input id="taskTitle" maxlength="200" value="Untitled draft" required><button class="button button-secondary" type="submit">Create workspace</button></form>
+          <div class="prompt-area"><label for="prompt">Your instructions</label><textarea id="prompt" rows="5" maxlength="20000" placeholder="Describe the topic, intended audience, tone, format, and what a successful result should include…" required></textarea>
+            <div class="composer-footer"><div class="model-controls"><label for="mode">Generation</label><select id="mode"><option value="ollama">Local Ollama model</option><option value="no_llm">Template mode (no LLM)</option></select><label for="modelName" class="model-label">Model</label><select id="modelName" disabled><option value="">Discovering models…</option></select></div><button id="generateButton" class="button button-primary" type="submit" form="generateForm">✦ Generate draft</button></div>
+          </div>
+          <form id="generateForm" class="hidden-form"></form>
+        </div>
+        <section id="draftSection" class="draft-card"><div class="draft-header"><div><div class="eyebrow">WORKING DOCUMENT</div><h3>Your draft</h3></div><div id="draftStatus" class="status-pill neutral">Waiting for a prompt</div></div><textarea id="draftOutput" class="draft-output" placeholder="Your generated content will appear here…" spellcheck="true"></textarea><div class="draft-footer"><span id="draftMeta">Generate a draft to begin. The original version will be checkpointed automatically.</span><div class="draft-actions"><button id="copyDraft" class="button button-secondary" type="button" disabled>Copy text</button><button id="reviewDraft" class="button button-primary" type="button" disabled>Review draft</button></div></div></section>
+        <div class="quiet-note"><span>✦</span><p><strong>Quality protection is on.</strong> Drafts are checked and versioned. Human approval is required before a generated version becomes a safe recovery point.</p></div>
+      </section>
+      <section id="view-history" class="view"><div class="section-intro"><h2>Your recent work</h2><p>Reopen a task to inspect its versions and continue working.</p></div><div class="panel"><form id="loadTaskForm" class="load-task-form"><label for="loadTaskId">Have a task ID?</label><input id="loadTaskId" placeholder="Paste a task ID"><button class="button button-secondary" type="submit">Open workspace</button></form><div id="historyContent" class="empty-state">Create a workspace to begin building your history.</div></div></section>
+      <section id="view-checkpoints" class="view"><div class="section-intro"><h2>Versions & recovery</h2><p>Review draft status and recover the latest verified safe version when needed.</p></div><div class="recovery-banner"><div class="recovery-icon">↶</div><div><strong>Recover without losing your safe version</strong><p>Rollback selects the latest verified safe checkpoint. Pending or rejected drafts are not eligible.</p></div><button id="rollbackButton" class="button button-danger" type="button" disabled>Recover safe version</button></div><div class="panel"><div class="panel-title-row"><div><h3>Checkpoint history</h3><p id="checkpointSubtitle">Select or create a workspace to view versions.</p></div><button id="refreshButton" class="button button-secondary" type="button">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Version</th><th>Review</th><th>Integrity</th><th>Recovery</th><th>Actions</th></tr></thead><tbody id="checkpointRows"><tr><td colspan="5" class="table-empty">No workspace selected.</td></tr></tbody></table></div></div></section>
+      <section id="view-insights" class="view"><div class="section-intro"><h2>Insights & audit</h2><p>Technical evidence for review, debugging, and project evaluation. Most writers won't need this every day.</p></div><div class="metric-grid"><div class="metric-card"><span>Checkpoints</span><strong id="metricCheckpoints">—</strong><small>Versions in current task</small></div><div class="metric-card"><span>Approved versions</span><strong id="metricApproved">—</strong><small>Human-approved checkpoints</small></div><div class="metric-card"><span>Safe recovery points</span><strong id="metricSafe">—</strong><small>Eligible versions</small></div></div><div class="panel"><div class="panel-title-row"><div><h3>Audit events</h3><p>Recorded generation, review, and recovery activity.</p></div><button id="eventsButton" class="button button-secondary" type="button">Load events</button></div><div id="eventsList" class="events-list empty-state">Select a workspace to load events.</div></div><div class="panel evaluation-panel"><div><h3>Runtime evaluation</h3><p>Run the deterministic recovery scenarios used by the research prototype.</p></div><div class="eval-controls"><label for="repetitions">Repetitions <input id="repetitions" type="number" min="1" max="100" value="3"></label><button id="runEvaluation" class="button button-secondary" type="button">Run evaluation</button></div><pre id="evaluationResult" class="evaluation-result">No evaluation run yet.</pre></div></section>
+      <footer><span>DraftGuard · Research prototype</span><span>Automated checks support review; they do not guarantee factual correctness.</span></footer>
+    </main>
+  </div>
+  <dialog id="reviewDialog"><form id="reviewForm" class="dialog-card"><div class="dialog-heading"><div><div class="eyebrow">HUMAN REVIEW</div><h3 id="reviewTitle">Review this draft</h3></div><button id="closeReview" type="button" class="icon-button" aria-label="Close dialog">×</button></div><p id="reviewDescription">Review the draft before approving it as a safe recovery point.</p><input id="reviewCheckpointId" type="hidden"><label for="reviewer">Reviewer</label><input id="reviewer" maxlength="120" value="reviewer-1" required><label for="reviewReason">Reason for this decision</label><textarea id="reviewReason" rows="3" minlength="3" maxlength="2000" required placeholder="Explain what you checked and why…"></textarea><div class="dialog-actions"><button id="cancelReview" type="button" class="button button-secondary">Cancel</button><button id="confirmReview" type="submit" class="button button-primary">Approve draft</button></div></form></dialog>
+</body></html>

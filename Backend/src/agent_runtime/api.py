@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .checkpoint import CheckpointManager, CheckpointNotFoundError, SnapshotIntegrityError
@@ -44,6 +45,20 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
         title="Checkpoint and Rollback Agent API",
         description="Local-first content generation, deterministic evaluation, checkpointing, and recovery.",
         version="0.5.0",
+    )
+    # The frontend is a separate project folder and runs on its own local dev server.
+    # Restrict CORS to the expected local development origins; do not expose this API publicly.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:5500",
+            "http://localhost:5500",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
     app.state.workflow = workflow
     app.state.tasks = {}

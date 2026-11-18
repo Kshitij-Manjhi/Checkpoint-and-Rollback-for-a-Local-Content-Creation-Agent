@@ -351,3 +351,8 @@ the reviewer string belongs to a real authorized person.
   correct or harmless.
 - The existing narrow deterministic policy checks remain unchanged and are not a
   comprehensive safety classifier.
+
+
+## Step 6 — Separate frontend
+
+The frontend is maintained in the sibling `Frontend/` folder at the project root. It is an independent browser UI and calls the FastAPI backend over HTTP. See the root `README.md` and `Frontend/README.md` for commands. The backend no longer serves static frontend files.
