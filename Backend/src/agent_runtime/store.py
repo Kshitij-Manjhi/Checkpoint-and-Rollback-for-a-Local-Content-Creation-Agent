@@ -134,6 +134,43 @@ class SQLiteCheckpointStore:
             for row in rows
         ]
 
+    def review_checkpoint(
+        self, checkpoint_id: str, *, approved: bool, reviewer: str,
+        reason: str, reviewed_at: str,
+    ) -> dict[str, Any] | None:
+        """Record a human decision in the snapshot and set its rollback eligibility."""
+        import hashlib
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM checkpoints WHERE checkpoint_id = ?", (checkpoint_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                state = json.loads(row["snapshot_json"])
+            except json.JSONDecodeError:
+                raise ValueError("Cannot review a checkpoint with invalid snapshot JSON")
+            if not isinstance(state, dict):
+                raise ValueError("Checkpoint state must be a JSON object")
+            state.update({
+                "approval_status": "approved" if approved else "rejected",
+                "reviewer": reviewer,
+                "review_reason": reason,
+                "reviewed_at": reviewed_at,
+            })
+            snapshot_json = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            digest = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
+            connection.execute(
+                "UPDATE checkpoints SET snapshot_json = ?, snapshot_sha256 = ?, is_safe = ? WHERE checkpoint_id = ?",
+                (snapshot_json, digest, int(approved), checkpoint_id),
+            )
+            return {
+                "checkpoint_id": checkpoint_id, "task_id": row["task_id"],
+                "is_safe": approved, "approval_status": state["approval_status"],
+                "reviewer": reviewer, "review_reason": reason, "reviewed_at": reviewed_at,
+            }
+
     def tamper_snapshot_for_test(self, checkpoint_id: str, snapshot_json: str) -> None:
         """Test helper: deliberately corrupt a stored snapshot without its digest."""
         with self._connect() as connection:
@@ -141,3 +178,52 @@ class SQLiteCheckpointStore:
                 "UPDATE checkpoints SET snapshot_json = ? WHERE checkpoint_id = ?",
                 (snapshot_json, checkpoint_id),
             )
+
+    def list_checkpoints(self, task_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM checkpoints WHERE task_id = ? ORDER BY sequence",
+                (task_id,),
+            ).fetchall()
+        return [
+            {
+                "checkpoint_id": row["checkpoint_id"],
+                "task_id": row["task_id"],
+                "sequence": row["sequence"],
+                "parent_checkpoint_id": row["parent_checkpoint_id"],
+                "snapshot_sha256": row["snapshot_sha256"],
+                "is_safe": bool(row["is_safe"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def get_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM checkpoints WHERE checkpoint_id = ?",
+                (checkpoint_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        import hashlib
+        actual_digest = hashlib.sha256(row["snapshot_json"].encode("utf-8")).hexdigest()
+        integrity_verified = actual_digest == row["snapshot_sha256"]
+        state = None
+        if integrity_verified:
+            try:
+                state = json.loads(row["snapshot_json"])
+            except json.JSONDecodeError:
+                integrity_verified = False
+        return {
+            "checkpoint_id": row["checkpoint_id"],
+            "task_id": row["task_id"],
+            "sequence": row["sequence"],
+            "parent_checkpoint_id": row["parent_checkpoint_id"],
+            "snapshot_sha256": row["snapshot_sha256"],
+            "is_safe": bool(row["is_safe"]),
+            "created_at": row["created_at"],
+            "integrity_verified": integrity_verified,
+            "state": state,
+        }
+

@@ -122,3 +122,232 @@ The standalone terminal entry points use descriptive filenames:
 Both write local state under `runtime_data/`. These standalone entry points are
 kept separate from the tested modular checkpoint and evaluation engine in
 `src/agent_runtime/`; their simple rule checks are not a production safety evaluator.
+
+
+## Step 3 — Model selection, generation, and deterministic evaluation
+
+Step 3 adds a modular workflow on top of the same tested checkpoint store and
+rollback manager. It does not replace the Step 1/2 experiment harness.
+
+### Dynamic Ollama model discovery
+
+The provider reads `GET http://localhost:11434/api/tags` each time
+`OllamaModelProvider.list_models()` is called. Model names are not hardcoded.
+The names available depend on what is installed and what Ollama reports.
+Generation uses `POST /api/generate` with `stream: false`.
+
+### Two generation modes
+
+- `no_llm`: deterministic template-based content, no Ollama process, API key,
+  model download, or external dependency required.
+- `ollama`: uses a caller-selected model returned by dynamic discovery.
+
+### Shared workflow example
+
+```python
+from agent_runtime import CheckpointManager, ContentWorkflow, OllamaModelProvider
+from agent_runtime.store import SQLiteCheckpointStore
+
+store = SQLiteCheckpointStore("runtime_data/runtime.sqlite3")
+workflow = ContentWorkflow(CheckpointManager(store))
+
+# Always available, even when Ollama is not installed/running:
+result = workflow.generate("task-001", "Explain checkpoint recovery", mode="no_llm")
+print(result["evaluation"]["decision"])
+
+# When Ollama is running, list installed models and select one:
+provider = OllamaModelProvider()
+models = provider.list_models()
+print(models)
+result = workflow.generate(
+    "task-001", "Explain checkpoint recovery",
+    mode="ollama", model_name=models[0],  # replace with the user's selection
+)
+print(result["state"]["model_name"])
+```
+
+A first run creates an initial safe baseline. Each generated candidate is
+evaluated and checkpointed through the same `CheckpointManager`. Only an
+`accept` result is marked safe. Rejected or review-needed candidates are saved
+as unsafe checkpoints for traceability and cannot be selected by safe rollback.
+`workflow.rollback(task_id)` uses the same verified restore path from Step 1.
+
+### Quality and policy decisions
+
+`QualityPolicyEvaluator` returns `accept`, `reject`, or `needs_human_review`,
+along with a score, reason codes, and per-check outcomes. The checks are explicit
+and deterministic: empty content and known prohibited markers are rejected;
+short drafts and a small set of high-impact claims require human review.
+These rules are intentionally narrow and transparent. They are **not** a
+comprehensive safety classifier, factuality verifier, or substitute for human
+approval. The generator model is not used as the sole safety judge.
+
+Audit events include task/checkpoint IDs and, for generated candidates, mode,
+selected model name (or null in no-LLM mode), decision, reason codes, and lengths.
+Prompt and full draft text are stored in the checkpoint snapshot; treat the local
+SQLite database as project data and do not put real secrets or sensitive personal
+data in test prompts.
+
+### Run all tests
+
+```powershell
+python -m pip install -e ".[test]"
+python -m pytest -v
+```
+
+The Step 3 tests use a fake provider for predictable tests and mocked HTTP
+responses for model discovery, so the suite does not require Ollama to be running.
+
+
+### Interactive Step 3 CLI
+
+From the `Backend` folder after installing the package:
+
+```powershell
+python -m pip install -e ".[test]"
+python step3_cli.py
+```
+
+Choose No-LLM mode for a fully local deterministic template. Choose Ollama mode
+to query the currently installed model list and select a model by number. The
+modular workflow stores checkpoints and audit events in
+`runtime_data/runtime.sqlite3`. This CLI is a prototype interface, not a web API.
+
+
+## Step 4 — REST API for frontend integration
+
+Step 4 adds a FastAPI adapter around the same `ContentWorkflow`, checkpoint
+manager, quality/policy evaluator, and Step 2 evaluation runner. The API does
+not implement a second checkpoint or rollback engine.
+
+### Install and run
+
+```powershell
+python -m pip install -e ".[test]"
+python -m uvicorn agent_runtime.api:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000/docs` for interactive API documentation. The server
+binds to localhost by default in the command above. Do not expose it to an
+untrusted network without adding authentication, authorization, request limits,
+and deployment hardening.
+
+The default SQLite database is `runtime_data/runtime.sqlite3`. Override it with
+the `AGENT_RUNTIME_DB` environment variable. The experimental evaluation runner
+uses `AGENT_EVALUATION_DB`, defaulting to `runtime_data/evaluation_api.sqlite3`.
+
+### Endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/api/health` | Service health |
+| GET | `/api/models` | Dynamically discover installed Ollama models; reports unavailable if Ollama is offline |
+| POST | `/api/tasks` | Create a task ID/title |
+| POST | `/api/tasks/{task_id}/generate` | Generate and evaluate a candidate |
+| GET | `/api/tasks/{task_id}` | Task metadata and latest safe state |
+| GET | `/api/tasks/{task_id}/checkpoints` | Checkpoint history |
+| GET | `/api/checkpoints/{checkpoint_id}` | Checkpoint metadata, snapshot, and integrity status |
+| POST | `/api/checkpoints/{checkpoint_id}/rollback` | Roll back the task to its latest verified safe checkpoint |
+| POST | `/api/tasks/{task_id}/rollback` | Roll back a task to its latest verified safe checkpoint |
+| POST | `/api/evaluations/run` | Run deterministic Step 2 experiments |
+| GET | `/api/tasks/{task_id}/events` | Audit event history |
+
+### Example requests
+
+Create a task:
+
+```json
+{"task_id":"article-001","title":"Article draft"}
+```
+
+Generate without an LLM:
+
+```json
+{"prompt":"Explain recoverable AI workflows","mode":"no_llm"}
+```
+
+Generate with Ollama:
+
+```json
+{"prompt":"Explain recoverable AI workflows","mode":"ollama","model_name":"qwen3:8b"}
+```
+
+Run five repetitions per deterministic scenario:
+
+```json
+{"repetitions":5}
+```
+
+### Integration notes and current boundaries
+
+- Task titles/creation metadata currently live in the API process memory. Checkpoints
+  and audit events are persisted in SQLite. A future task registry migration can
+  persist task titles and lifecycle metadata across restarts.
+- `/api/checkpoints/{checkpoint_id}/rollback` identifies the task from the requested
+  checkpoint and invokes the safe rollback policy. The runtime selects the latest
+  verified safe checkpoint for that task; it does not promise arbitrary historical
+  restore to an unsafe or older snapshot.
+- `/api/checkpoints/{checkpoint_id}` returns the snapshot state only when its digest
+  verifies. Treat this endpoint as sensitive local project data.
+- The API has no authentication or user/tenant isolation and is intended for a
+  local student prototype. Keep it bound to localhost unless secured.
+- The deterministic evaluation endpoint writes its own experimental database/report
+  and does not measure real-world LLM safety or semantic quality.
+
+### API tests
+
+The API tests use a fake Ollama provider and temporary SQLite databases. They
+exercise task creation, model listing, generation, checkpoint inspection,
+audit events, policy rejection, rollback, and invalid requests without requiring
+a running Ollama server.
+
+
+## Step 5 — Human approval gate and governed rollback
+
+Step 5 changes the checkpoint eligibility rule: **automated acceptance is not human approval**.
+The initial empty baseline remains safe, but every generated candidate is stored as
+unsafe until a human reviewer approves it. Automated policy rejection is marked
+`blocked` and cannot be approved through the normal review endpoint.
+
+### Review a generated candidate
+
+In Swagger at `http://127.0.0.1:8000/docs`:
+
+1. Create a task and generate a draft.
+2. Copy the returned `checkpoint_id`.
+3. Call `POST /api/checkpoints/{checkpoint_id}/review` with one of these bodies.
+
+Approve:
+```json
+{
+  "decision": "approve",
+  "reviewer": "reviewer-1",
+  "reason": "Reviewed for clarity and policy compliance."
+}
+```
+
+Reject:
+```json
+{
+  "decision": "reject",
+  "reviewer": "reviewer-1",
+  "reason": "Contains unsupported claims and needs revision."
+}
+```
+
+A checkpoint can be reviewed only once. The reviewer, decision, reason, and
+timestamp are stored in the snapshot and recorded as an audit event. The snapshot
+digest is recomputed after this metadata update. Approved checkpoints become
+eligible for rollback; rejected and pending drafts remain ineligible. This is a
+prototype review gate, not identity authentication: the API does not verify that
+the reviewer string belongs to a real authorized person.
+
+### Step 5 limitations
+
+- Human review is represented by an API call; no graphical review UI is included yet.
+- Authentication, reviewer identity verification, role-based access, and concurrent
+  review hardening remain future work.
+- Approval is a human workflow decision, not proof that the content is factually
+  correct or harmless.
+- The existing narrow deterministic policy checks remain unchanged and are not a
+  comprehensive safety classifier.

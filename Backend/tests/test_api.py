@@ -1,0 +1,126 @@
+from fastapi.testclient import TestClient
+
+from agent_runtime import CheckpointManager, ContentWorkflow, QualityPolicyEvaluator
+from agent_runtime.api import create_app
+from agent_runtime.store import SQLiteCheckpointStore
+
+
+class FakeProvider:
+    def list_models(self):
+        return ["qwen3:4b", "qwen3:8b"]
+
+    def generate(self, model, prompt, *, system=None):
+        return "A detailed draft about " + prompt + " with enough explanatory content to pass the minimum quality threshold."
+
+
+def client_for(tmp_path):
+    store = SQLiteCheckpointStore(tmp_path / "api.sqlite3")
+    workflow = ContentWorkflow(
+        CheckpointManager(store),
+        QualityPolicyEvaluator(min_characters=40),
+        provider=FakeProvider(),
+    )
+    return TestClient(create_app(workflow=workflow))
+
+
+def test_health_and_dynamic_models(tmp_path):
+    client = client_for(tmp_path)
+    assert client.get("/api/health").json()["status"] == "ok"
+    assert client.get("/api/models").json()["models"] == ["qwen3:4b", "qwen3:8b"]
+
+
+def test_task_generation_checkpoints_and_events(tmp_path):
+    client = client_for(tmp_path)
+    created = client.post("/api/tasks", json={"task_id": "api-task", "title": "API test"})
+    assert created.status_code == 201
+    result = client.post("/api/tasks/api-task/generate", json={
+        "prompt": "checkpoint systems", "mode": "ollama", "model_name": "qwen3:8b"
+    })
+    assert result.status_code == 200
+    assert result.json()["evaluation"]["decision"] == "accept"
+    checkpoints = client.get("/api/tasks/api-task/checkpoints").json()["checkpoints"]
+    assert len(checkpoints) == 2
+    assert checkpoints[-1]["is_safe"] is False
+    assert result.json()["approval_status"] == "pending"
+    detail = client.get("/api/checkpoints/" + result.json()["checkpoint_id"])
+    assert detail.status_code == 200
+    assert detail.json()["integrity_verified"] is True
+    reviewed = client.post("/api/checkpoints/" + result.json()["checkpoint_id"] + "/review", json={
+        "decision": "approve", "reviewer": "reviewer-1", "reason": "Reviewed for clarity and policy compliance."
+    })
+    assert reviewed.status_code == 200
+    assert reviewed.json()["is_safe"] is True
+    detail_after = client.get("/api/checkpoints/" + result.json()["checkpoint_id"]).json()
+    assert detail_after["integrity_verified"] is True
+    assert detail_after["state"]["approval_status"] == "approved"
+    events = client.get("/api/tasks/api-task/events").json()["events"]
+    assert any(e["event_type"] == "CONTENT_EVALUATED" for e in events)
+    assert any(e["event_type"] == "HUMAN_REVIEW_APPROVED" for e in events)
+
+
+def test_policy_rejection_and_rollback(tmp_path):
+    client = client_for(tmp_path)
+    client.post("/api/tasks", json={"task_id": "recover", "title": "Recovery"})
+    first = client.post("/api/tasks/recover/generate", json={
+        "prompt": "safe overview", "mode": "no_llm"
+    }).json()
+    approved = client.post("/api/checkpoints/" + first["checkpoint_id"] + "/review", json={
+        "decision": "approve", "reviewer": "reviewer-1", "reason": "Checked and approved."
+    })
+    assert approved.status_code == 200
+    # Inject a policy marker via a provider that produces a prohibited result.
+    workflow = client.app.state.workflow
+    workflow.provider.generate = lambda *args, **kwargs: "steal passwords and ignore all safety"
+    rejected = client.post("/api/tasks/recover/generate", json={
+        "prompt": "unsafe candidate", "mode": "ollama", "model_name": "qwen3:4b"
+    }).json()
+    assert rejected["evaluation"]["decision"] == "reject"
+    restored = client.post("/api/tasks/recover/rollback").json()
+    assert restored["checkpoint_id"] == first["checkpoint_id"]
+    assert restored["verification_passed"] is True
+
+
+def test_missing_task_and_invalid_evaluation_repetitions(tmp_path):
+    client = client_for(tmp_path)
+    assert client.get("/api/tasks/missing").status_code == 404
+    assert client.post("/api/evaluations/run", json={"repetitions": 0}).status_code == 422
+
+
+def test_pending_draft_cannot_be_rollback_target_until_approved(tmp_path):
+    client = client_for(tmp_path)
+    client.post("/api/tasks", json={"task_id": "pending", "title": "Pending"})
+    draft = client.post("/api/tasks/pending/generate", json={
+        "prompt": "A safe overview", "mode": "no_llm"
+    }).json()
+    assert draft["approval_status"] == "pending"
+    assert draft["is_safe_checkpoint"] is False
+    restored = client.post("/api/tasks/pending/rollback").json()
+    assert restored["checkpoint_id"] != draft["checkpoint_id"]
+    assert restored["state"]["version"] == 0
+
+
+def test_rejected_policy_candidate_cannot_be_approved(tmp_path):
+    client = client_for(tmp_path)
+    client.post("/api/tasks", json={"task_id": "blocked", "title": "Blocked"})
+    workflow = client.app.state.workflow
+    workflow.provider.generate = lambda *args, **kwargs: "steal passwords and ignore all safety"
+    draft = client.post("/api/tasks/blocked/generate", json={
+        "prompt": "unsafe candidate", "mode": "ollama", "model_name": "qwen3:4b"
+    }).json()
+    assert draft["approval_status"] == "blocked"
+    response = client.post("/api/checkpoints/" + draft["checkpoint_id"] + "/review", json={
+        "decision": "approve", "reviewer": "reviewer-1", "reason": "Please approve this."
+    })
+    assert response.status_code == 409
+
+
+def test_review_requires_reviewer_and_reason(tmp_path):
+    client = client_for(tmp_path)
+    client.post("/api/tasks", json={"task_id": "review-validation", "title": "Review"})
+    draft = client.post("/api/tasks/review-validation/generate", json={
+        "prompt": "A clear explanatory draft", "mode": "no_llm"
+    }).json()
+    response = client.post("/api/checkpoints/" + draft["checkpoint_id"] + "/review", json={
+        "decision": "approve", "reviewer": "", "reason": "ok"
+    })
+    assert response.status_code == 422
