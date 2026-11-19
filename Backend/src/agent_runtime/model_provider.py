@@ -1,6 +1,7 @@
 """Ollama model discovery and local generation; no third-party dependencies."""
 from __future__ import annotations
 import json
+import os
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
 
@@ -10,8 +11,9 @@ class OllamaUnavailableError(RuntimeError):
 
 
 class OllamaModelProvider:
-    def __init__(self, base_url: str = "http://localhost:11434", timeout: float = 30.0):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None, timeout: float = 30.0):
+        configured_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.base_url = configured_url.rstrip("/")
         self.timeout = timeout
 
     def list_models(self) -> list[str]:
@@ -29,6 +31,20 @@ class OllamaModelProvider:
             for item in models
             if isinstance(item, dict) and str(item.get("name", "")).strip()
         })
+
+    def model_version(self, model_name: str) -> str | None:
+        """Return Ollama's model digest when the local tags endpoint exposes it."""
+        request = Request(self.base_url + "/api/tags", headers={"Accept": "application/json"})
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (URLError, HTTPError, TimeoutError, json.JSONDecodeError, OSError):
+            return None
+        for item in payload.get("models", []):
+            if isinstance(item, dict) and item.get("name") == model_name:
+                digest = item.get("digest")
+                return str(digest) if digest else None
+        return None
 
     def generate(self, model: str, prompt: str, *, system: str | None = None) -> str:
         if not model or not model.strip():

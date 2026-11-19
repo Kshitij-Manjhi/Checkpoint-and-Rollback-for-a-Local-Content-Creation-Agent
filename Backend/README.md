@@ -50,7 +50,34 @@ print(f"Rollback latency: {restored.rollback_latency_ms:.3f} ms")
 
 ## Current implementation boundary
 
-SQLite is used as a lightweight local experiment adapter so the first recovery tests run without a database server. The project brief's proposed MySQL metadata store and Git/object-store artifact storage remain possible later adapters; this choice is not a claim that the final storage architecture has been decided.
+The standalone checkpoint unit tests still use SQLite so they can run without a database server. The API's required deployment mode is `AGENT_RUNTIME_STORAGE=mysql`. In this mode it uses MySQL for task/checkpoint/audit metadata, a dedicated Git repository for checkpoint artifacts, persistent ChromaDB retrieval for task-scoped prior prompts/drafts, local Ollama/Qwen generation, and the Python orchestration harness. Chroma embeddings use deterministic local feature hashing, so no embedding model is downloaded.
+
+### Configure MySQL and run the required stack
+
+1. Install/start MySQL 8+ locally and create a database/user (replace the sample password):
+
+```sql
+CREATE DATABASE draftguard CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'draftguard'@'localhost' IDENTIFIED BY 'CHANGE_ME';
+GRANT ALL PRIVILEGES ON draftguard.* TO 'draftguard'@'localhost';
+```
+
+2. Copy `.env.example` to `.env` in this `Backend` directory and replace `CHANGE_ME` with your password. Alternatively, set the same variables in PowerShell. The app loads `.env` automatically if `python-dotenv` is installed. From this `Backend` directory:
+
+```powershell
+python -m pip install -e ".[test]"
+# If not using Backend/.env, set AGENT_RUNTIME_STORAGE and AGENT_RUNTIME_MYSQL_URL here.
+$env:AGENT_RUNTIME_STORAGE = "mysql"
+$env:AGENT_RUNTIME_MYSQL_URL = "mysql://draftguard:CHANGE_ME@127.0.0.1:3306/draftguard"
+$env:AGENT_RUNTIME_DATA_DIR = "runtime_data"
+$env:AGENT_ARTIFACT_GIT_DIR = "runtime_data/artifact_repository"
+$env:AGENT_EVIDENCE_DIR = "runtime_data/evidence_index"
+python -m uvicorn agent_runtime.api:app --host 127.0.0.1 --port 8000
+```
+
+Use a URL-encoded password if it contains URL-reserved characters. The MySQL adapter creates its tables at startup. Git must be installed and available on `PATH`. Ollama must be running locally for Qwen generation. ChromaDB persists locally in the configured evidence directory.
+
+`AGENT_RUNTIME_STORAGE=sqlite` is an explicit development/test-only mode; it does not enable the required MySQL/Git/Chroma stack. The application does not silently fall back to SQLite if MySQL configuration is missing. Unit tests using `SQLiteCheckpointStore` do not validate live MySQL connectivity.
 
 The `is_safe` flag is supplied by the caller in this step. It is not an AI safety judgement. The next step will define the evaluator contract and failure-injection scenarios.
 
@@ -167,10 +194,12 @@ print(result["state"]["model_name"])
 ```
 
 A first run creates an initial safe baseline. Each generated candidate is
-evaluated and checkpointed through the same `CheckpointManager`. Only an
-`accept` result is marked safe. Rejected or review-needed candidates are saved
-as unsafe checkpoints for traceability and cannot be selected by safe rollback.
-`workflow.rollback(task_id)` uses the same verified restore path from Step 1.
+evaluated and checkpointed through the same `CheckpointManager`. An `accept`
+result means eligible for human review; it does not make the candidate safe.
+Every generated candidate remains unsafe until a human reviewer approves it.
+Rejected candidates are blocked from normal approval, and review-needed
+candidates remain unsafe pending a human decision. `workflow.rollback(task_id)`
+uses the same verified restore path from Step 1.
 
 ### Quality and policy decisions
 
@@ -351,3 +380,62 @@ the reviewer string belongs to a real authorized person.
   correct or harmless.
 - The existing narrow deterministic policy checks remain unchanged and are not a
   comprehensive safety classifier.
+
+
+## Step 6 — Separate frontend
+
+The frontend is maintained in the sibling `Frontend/` folder at the project root. It is an independent browser UI and calls the FastAPI backend over HTTP. See the root `README.md` and `Frontend/README.md` for commands. The backend no longer serves static frontend files.
+
+## Step 7 — Quality Evaluation Engine
+
+The current workflow evaluates every generated draft before checkpointing it.
+The deterministic evaluator now reports five explainable dimensions on a 0–5
+scale: relevance, completeness, clarity, factual support, and style/format. Their
+initial weights are 30%, 25%, 20%, 15%, and 10%, respectively. The normalized
+`quality_score` field remains in the legacy 0–1 range for compatibility;
+`quality_score_percent` exposes the same weighted score on a 0–100 scale.
+These weights and heuristics are initial prototype settings and should be
+calibrated against a human-labelled evaluation set.
+
+### Optional semantic evaluation with local Ollama/Qwen
+
+When a real Ollama provider is used for `mode="ollama"`, semantic scoring runs
+automatically by default using the selected generation model. It asks the local
+model for JSON scores and short reasons. The response is validated before it is
+used. If the model returns malformed JSON, an invalid score, or an evaluation
+error, the candidate is routed to human review rather than being silently passed.
+
+Configuration:
+
+- `AGENT_SEMANTIC_EVALUATION=auto` (default): use semantic scoring for Ollama-generated drafts.
+- `AGENT_SEMANTIC_EVALUATION=1`: explicitly enable semantic scoring; in template mode, set `AGENT_QUALITY_MODEL` to an installed model name to request a semantic evaluation.
+- `AGENT_SEMANTIC_EVALUATION=0`: disable semantic scoring and use deterministic checks only.
+
+Semantic scoring is a model judgement, not independent verification of facts.
+The factual-support dimension remains unverified unless suitable source evidence
+is supplied and checked. Neither a high score nor the model evaluator can mark
+a checkpoint safe. The existing human review route remains the authority for
+approval, and rollback continues to restore only the latest integrity-verified
+safe checkpoint. Known hard policy markers still reject candidates and cannot
+be overridden by semantic scores.
+
+The generation response keeps its existing fields and adds `quality_score_percent`,
+`scores`, `evaluator_version`, `evaluation_mode`, and `semantic_evaluation` inside
+the existing evaluation object. The `CONTENT_EVALUATED` audit event records the
+scores, evaluation mode, semantic status, model name, decision, and reason codes.
+
+### Validation
+
+The test suite covers score structure, semantic JSON validation, evaluator failure,
+unsafe checkpoint behavior, existing human approval/rejection, and rollback. The
+unit tests use fake providers and do not constitute a live Ollama quality benchmark.
+Record results from actual local Qwen runs separately before making claims about
+semantic accuracy or agreement with human reviewers.
+
+
+## Required stack integration notes
+
+- Checkpoint state includes retrieved evidence references and excerpts; audit events record Git artifact URIs/digests and retrieved evidence IDs.
+- Human review publishes the reviewed snapshot as a new Git commit to keep artifact versions aligned with updated metadata digests.
+- Chroma is task-scoped; deterministic feature-hashing embeddings are a lightweight local retrieval baseline, not a semantic embedding model.
+- Live MySQL, Ollama/Qwen, and end-to-end Chroma retrieval should be smoke-tested on the target machine after services and dependencies are installed.

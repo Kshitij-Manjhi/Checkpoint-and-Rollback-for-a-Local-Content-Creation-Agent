@@ -11,3 +11,7 @@ venv/
 demo_data/
 
 runtime_data/
+
+# Local artifact/version and retrieval stores
+artifact_repository/
+evidence_index/

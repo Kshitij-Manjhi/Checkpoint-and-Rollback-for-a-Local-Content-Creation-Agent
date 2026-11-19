@@ -6,12 +6,23 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+# Optional local .env file; environment variables supplied by the shell take precedence.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+except ImportError:
+    pass
 
 from .checkpoint import CheckpointManager, CheckpointNotFoundError, SnapshotIntegrityError
 from .model_provider import OllamaUnavailableError
 from .quality_policy import QualityPolicyEvaluator
 from .store import SQLiteCheckpointStore
+from .mysql_store import MySQLCheckpointStore
+from .artifact_store import GitArtifactStore
+from .retrieval_store import LocalEvidenceIndex
 from .workflow import ContentWorkflow
 
 
@@ -35,18 +46,42 @@ class ReviewRequest(BaseModel):
 def create_app(database_path: str | Path | None = None, workflow: ContentWorkflow | None = None) -> FastAPI:
     """App factory makes storage/workflow injectable for tests and deployments."""
     if workflow is None:
-        db_path = database_path or os.environ.get("AGENT_RUNTIME_DB", "runtime_data/runtime.sqlite3")
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        store = SQLiteCheckpointStore(db_path)
-        workflow = ContentWorkflow(CheckpointManager(store), QualityPolicyEvaluator())
+        storage_mode = os.environ.get("AGENT_RUNTIME_STORAGE", "mysql").strip().lower()
+        if storage_mode == "mysql":
+            store = MySQLCheckpointStore()
+            data_dir = Path(os.environ.get("AGENT_RUNTIME_DATA_DIR", "runtime_data"))
+            artifact_store = GitArtifactStore(os.environ.get("AGENT_ARTIFACT_GIT_DIR", str(data_dir / "artifact_repository")))
+            retrieval = LocalEvidenceIndex(os.environ.get("AGENT_EVIDENCE_DIR", str(data_dir / "evidence_index")))
+            workflow = ContentWorkflow(CheckpointManager(store, artifact_store=artifact_store), QualityPolicyEvaluator(), retrieval=retrieval)
+        elif storage_mode == "sqlite":
+            # Explicit development/test mode only. It does not enable the required MySQL/Git/FAISS stack.
+            db_path = database_path or os.environ.get("AGENT_RUNTIME_DB", "runtime_data/runtime.sqlite3")
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            store = SQLiteCheckpointStore(db_path)
+            workflow = ContentWorkflow(CheckpointManager(store), QualityPolicyEvaluator())
+        else:
+            raise RuntimeError("AGENT_RUNTIME_STORAGE must be mysql or sqlite; use mysql for the required deployment stack.")
 
     app = FastAPI(
         title="Checkpoint and Rollback Agent API",
-        description="Local-first content generation, deterministic evaluation, checkpointing, and recovery.",
-        version="0.5.0",
+        description="Local-first content generation, deterministic and optional local semantic evaluation, human-governed checkpointing, and recovery.",
+        version="0.7.0",
+    )
+    # The frontend is a separate project folder and runs on its own local dev server.
+    # Restrict CORS to the expected local development origins; do not expose this API publicly.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:5500",
+            "http://localhost:5500",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
     app.state.workflow = workflow
-    app.state.tasks = {}
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -66,23 +101,27 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
         task_id = (request.task_id or str(uuid.uuid4())).strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id must not be blank")
-        existing = app.state.tasks.get(task_id)
-        if existing:
-            raise HTTPException(status_code=409, detail="task_id already exists in this API session")
-        task = {"task_id": task_id, "title": request.title.strip(), "created": True}
-        app.state.tasks[task_id] = task
-        return task
+        store = workflow.checkpoints.store
+        created_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        title = request.title.strip()
+        if not store.create_task(task_id, title, created_at):
+            raise HTTPException(status_code=409, detail="task_id already exists")
+        return {"task_id": task_id, "title": title, "created": True}
 
     def ensure_task(task_id: str) -> dict[str, Any]:
-        task = app.state.tasks.get(task_id)
-        if task is None:
-            # Permit task IDs from a prior API process if the SQLite store has checkpoints.
-            row = workflow.checkpoints.store.latest_safe_checkpoint(task_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="Task not found")
-            task = {"task_id": task_id, "title": task_id, "created": False}
-            app.state.tasks[task_id] = task
-        return task
+        store = workflow.checkpoints.store
+        task = store.get_task(task_id)
+        if task is not None:
+            return {"task_id": task["task_id"], "title": task["title"], "created": False}
+        # Backward compatibility for checkpoint records created before task metadata
+        # was persisted. Recreate a minimal task record when historical checkpoints exist.
+        checkpoints = store.list_checkpoints(task_id)
+        if not checkpoints:
+            raise HTTPException(status_code=404, detail="Task not found")
+        created_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        store.create_task(task_id, task_id, created_at)
+        task = store.get_task(task_id)
+        return {"task_id": task["task_id"], "title": task["title"], "created": False}
 
     @app.post("/api/tasks/{task_id}/generate")
     def generate(task_id: str, request: GenerateRequest) -> dict[str, Any]:
@@ -98,7 +137,7 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
     def get_task(task_id: str) -> dict[str, Any]:
         task = ensure_task(task_id)
         events = workflow.checkpoints.store.get_audit_events(task_id)
-        checkpoint = workflow.checkpoints.store.latest_safe_checkpoint(task_id)
+        checkpoint = workflow.checkpoints.latest_verified_safe_checkpoint(task_id)
         state = None
         if checkpoint is not None:
             try:
@@ -149,13 +188,14 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
         )
         if result is None:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
-        workflow.checkpoints.store.add_audit_event(
-            task_id=result["task_id"], event_type="HUMAN_REVIEW_APPROVED" if approved else "HUMAN_REVIEW_REJECTED",
-            checkpoint_id=checkpoint_id,
-            details={"reviewer": request.reviewer.strip(), "reason": request.reason.strip(),
-                     "approval_status": result["approval_status"], "is_safe": approved},
-            created_at=reviewed_at,
-        )
+        # Human review mutates the snapshot; publish the reviewed state as a new Git commit.
+        manager = workflow.checkpoints
+        if manager.artifact_store is not None:
+            refreshed = manager.store.get_checkpoint(checkpoint_id)
+            if refreshed and refreshed.get("state") is not None:
+                uri = manager.artifact_store.put(checkpoint_id, refreshed["state"], refreshed["snapshot_sha256"])
+                manager.store.add_audit_event(refreshed["task_id"], "ARTIFACT_VERSIONED_AFTER_REVIEW", checkpoint_id,
+                    {"artifact_uri": uri, "artifact_sha256": refreshed["snapshot_sha256"], "review_decision": request.decision}, reviewed_at)
         return result
 
     @app.post("/api/checkpoints/{checkpoint_id}/rollback")
@@ -165,7 +205,7 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
             raise HTTPException(status_code=404, detail="Checkpoint not found")
         task_id = record["task_id"]
         try:
-            restored = workflow.rollback(task_id)
+            restored = workflow.rollback(task_id, requested_checkpoint_id=checkpoint_id)
         except CheckpointNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except SnapshotIntegrityError as exc:

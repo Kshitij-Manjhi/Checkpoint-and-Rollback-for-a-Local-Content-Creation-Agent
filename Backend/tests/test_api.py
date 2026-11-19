@@ -124,3 +124,17 @@ def test_review_requires_reviewer_and_reason(tmp_path):
         "decision": "approve", "reviewer": "", "reason": "ok"
     })
     assert response.status_code == 422
+
+
+def test_separate_frontend_origin_is_allowed_by_cors(tmp_path):
+    client = client_for(tmp_path)
+    response = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://127.0.0.1:5500",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5500"

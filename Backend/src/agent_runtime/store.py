@@ -45,6 +45,15 @@ class SQLiteCheckpointStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS audit_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL,
@@ -95,7 +104,37 @@ class SQLiteCheckpointStore:
             )
             return record["sequence"]
 
+    def create_task(self, task_id: str, title: str, created_at: str) -> bool:
+        """Persist task metadata. Returns False if the task ID already exists."""
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO tasks (task_id, title, created_at) VALUES (?, ?, ?)",
+                    (task_id, title, created_at),
+                )
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT task_id, title, created_at FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return {"task_id": row["task_id"], "title": row["title"], "created_at": row["created_at"]}
+
+    def list_safe_checkpoints(self, task_id: str) -> list[sqlite3.Row]:
+        """Return safe checkpoint candidates newest first, including potentially corrupt rows."""
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT * FROM checkpoints WHERE task_id = ? AND is_safe = 1 ORDER BY sequence DESC",
+                (task_id,),
+            ).fetchall()
+
     def latest_safe_checkpoint(self, task_id: str) -> sqlite3.Row | None:
+        """Return the newest row marked safe, without asserting snapshot integrity."""
         with self._connect() as connection:
             return connection.execute(
                 """SELECT * FROM checkpoints
@@ -164,6 +203,22 @@ class SQLiteCheckpointStore:
             connection.execute(
                 "UPDATE checkpoints SET snapshot_json = ?, snapshot_sha256 = ?, is_safe = ? WHERE checkpoint_id = ?",
                 (snapshot_json, digest, int(approved), checkpoint_id),
+            )
+            connection.execute(
+                """INSERT INTO audit_events
+                   (task_id, event_type, checkpoint_id, details_json, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    row["task_id"],
+                    "HUMAN_REVIEW_APPROVED" if approved else "HUMAN_REVIEW_REJECTED",
+                    checkpoint_id,
+                    json.dumps({
+                        "reviewer": reviewer, "reason": reason,
+                        "approval_status": "approved" if approved else "rejected",
+                        "is_safe": approved,
+                    }, sort_keys=True),
+                    reviewed_at,
+                ),
             )
             return {
                 "checkpoint_id": checkpoint_id, "task_id": row["task_id"],

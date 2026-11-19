@@ -1,9 +1,13 @@
 Metadata-Version: 2.4
 Name: local-agent-checkpoint-runtime
-Version: 0.1.0
+Version: 0.7.0
 Summary: A research prototype for verifiable checkpoint and rollback in local LLM agent workflows
 Requires-Python: >=3.10
 Requires-Dist: fastapi>=0.110
 Requires-Dist: uvicorn[standard]>=0.27
+Requires-Dist: mysql-connector-python>=8.3
+Requires-Dist: chromadb>=0.5.0
+Requires-Dist: python-dotenv>=1.0
 Provides-Extra: test
 Requires-Dist: pytest>=8.0; extra == "test"
+Requires-Dist: httpx>=0.27; extra == "test"
