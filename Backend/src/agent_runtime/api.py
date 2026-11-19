@@ -61,7 +61,6 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
         allow_headers=["Content-Type"],
     )
     app.state.workflow = workflow
-    app.state.tasks = {}
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -81,23 +80,27 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
         task_id = (request.task_id or str(uuid.uuid4())).strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id must not be blank")
-        existing = app.state.tasks.get(task_id)
-        if existing:
-            raise HTTPException(status_code=409, detail="task_id already exists in this API session")
-        task = {"task_id": task_id, "title": request.title.strip(), "created": True}
-        app.state.tasks[task_id] = task
-        return task
+        store = workflow.checkpoints.store
+        created_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        title = request.title.strip()
+        if not store.create_task(task_id, title, created_at):
+            raise HTTPException(status_code=409, detail="task_id already exists")
+        return {"task_id": task_id, "title": title, "created": True}
 
     def ensure_task(task_id: str) -> dict[str, Any]:
-        task = app.state.tasks.get(task_id)
-        if task is None:
-            # Permit task IDs from a prior API process if the SQLite store has checkpoints.
-            row = workflow.checkpoints.store.latest_safe_checkpoint(task_id)
-            if row is None:
-                raise HTTPException(status_code=404, detail="Task not found")
-            task = {"task_id": task_id, "title": task_id, "created": False}
-            app.state.tasks[task_id] = task
-        return task
+        store = workflow.checkpoints.store
+        task = store.get_task(task_id)
+        if task is not None:
+            return {"task_id": task["task_id"], "title": task["title"], "created": False}
+        # Backward compatibility for checkpoint records created before task metadata
+        # was persisted. Recreate a minimal task record when historical checkpoints exist.
+        checkpoints = store.list_checkpoints(task_id)
+        if not checkpoints:
+            raise HTTPException(status_code=404, detail="Task not found")
+        created_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        store.create_task(task_id, task_id, created_at)
+        task = store.get_task(task_id)
+        return {"task_id": task["task_id"], "title": task["title"], "created": False}
 
     @app.post("/api/tasks/{task_id}/generate")
     def generate(task_id: str, request: GenerateRequest) -> dict[str, Any]:
@@ -113,7 +116,7 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
     def get_task(task_id: str) -> dict[str, Any]:
         task = ensure_task(task_id)
         events = workflow.checkpoints.store.get_audit_events(task_id)
-        checkpoint = workflow.checkpoints.store.latest_safe_checkpoint(task_id)
+        checkpoint = workflow.checkpoints.latest_verified_safe_checkpoint(task_id)
         state = None
         if checkpoint is not None:
             try:

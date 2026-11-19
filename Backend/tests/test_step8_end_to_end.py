@@ -164,7 +164,7 @@ def test_semantic_evaluator_failure_requires_human_review_and_never_auto_approve
     assert evaluation_event["details"]["semantic_status"] == "error"
 
 
-def test_corrupted_safe_checkpoint_is_not_restored(tmp_path):
+def test_corrupted_newest_safe_checkpoint_falls_back_to_older_verified_checkpoint(tmp_path):
     client, store = make_client(tmp_path)
     create_task(client, "corruption-flow")
     draft = client.post(
@@ -178,9 +178,14 @@ def test_corrupted_safe_checkpoint_is_not_restored(tmp_path):
     assert detail["integrity_verified"] is False
     assert detail["state"] is None
 
+    # The initial baseline is still a valid safe checkpoint, so rollback skips the
+    # corrupted candidate and safely falls back to the older verified checkpoint.
     rollback = client.post("/api/tasks/corruption-flow/rollback")
-    assert rollback.status_code == 409
-    assert "integrity verification failed" in rollback.json()["detail"].lower()
+    assert rollback.status_code == 200
+    assert rollback.json()["verification_passed"] is True
+    assert rollback.json()["state"]["version"] == 0
+    events = client.get("/api/tasks/corruption-flow/events").json()["events"]
+    assert any(event["event_type"] == "ROLLBACK_CANDIDATE_REJECTED" for event in events)
 
 
 def test_rejecting_candidate_keeps_it_unsafe_and_rollback_uses_baseline(tmp_path):

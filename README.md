@@ -58,3 +58,16 @@ python -m pytest -q
 ```
 
 The test suite uses fake providers for predictable behavior. Passing unit tests does not establish live Ollama quality accuracy; run and label real examples separately for research evaluation.
+
+## Step 9 — Persistence and reliability
+
+- Task IDs, titles, and creation timestamps are now stored in SQLite rather than only in API process memory.
+- Task metadata and checkpoints remain available when a new API app instance starts against the same database file.
+- Existing databases are migrated non-destructively by creating the `tasks` table if it is absent. Older checkpoint-only tasks are reconstructed with their task ID as a fallback title when accessed.
+- Rollback checks safe checkpoints newest-first and verifies each snapshot's SHA-256 digest and JSON-object shape before restoring it.
+- If the newest safe checkpoint is corrupt or has an empty/missing snapshot payload, the runtime records `ROLLBACK_CANDIDATE_REJECTED` and tries an older safe checkpoint. If no verified safe checkpoint remains, rollback fails closed with an explicit error.
+- The original `is_safe` flag is not changed merely because a snapshot is corrupt; the corrupted record remains visible for investigation, but is ineligible for restoration.
+
+### Step 9 validation
+
+From `Backend`, run `python -m pytest -q`. The Step 9 suite adds tests for task metadata across app restarts, duplicate task IDs across app instances, fallback from corrupt and empty snapshots, and fail-closed behavior when every safe snapshot is corrupt. Tests use temporary SQLite files and fake providers; live browser and Ollama testing are separate manual checks.

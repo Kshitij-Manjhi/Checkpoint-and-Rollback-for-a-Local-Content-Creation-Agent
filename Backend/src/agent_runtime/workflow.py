@@ -37,7 +37,7 @@ class ContentWorkflow:
         initial_state = {"task_id": task_id, "prompt": "", "draft": "", "version": 0,
                          "mode": "system", "model_name": None, "decision": "accept"}
         try:
-            parent = self.checkpoints.store.latest_safe_checkpoint(task_id)
+            parent = self.checkpoints.latest_verified_safe_checkpoint(task_id)
         except Exception:
             parent = None
         if parent is None:
