@@ -11,6 +11,11 @@ cd Backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[test]"
+# Configure a local MySQL database first; copy Backend/.env.example to Backend/.env, then edit the URL/password. See Backend/README.md.
+$env:AGENT_RUNTIME_STORAGE = "mysql"
+$env:AGENT_RUNTIME_MYSQL_URL = "mysql://draftguard:CHANGE_ME@127.0.0.1:3306/draftguard"
+$env:AGENT_ARTIFACT_GIT_DIR = "runtime_data/artifact_repository"
+$env:AGENT_EVIDENCE_DIR = "runtime_data/evidence_index"
 python -m uvicorn agent_runtime.api:app --host 127.0.0.1 --port 8000
 ```
 
@@ -71,3 +76,45 @@ The test suite uses fake providers for predictable behavior. Passing unit tests 
 ### Step 9 validation
 
 From `Backend`, run `python -m pytest -q`. The Step 9 suite adds tests for task metadata across app restarts, duplicate task IDs across app instances, fallback from corrupt and empty snapshots, and fail-closed behavior when every safe snapshot is corrupt. Tests use temporary SQLite files and fake providers; live browser and Ollama testing are separate manual checks.
+
+## Step 10 — Experimental evaluation
+
+The evaluation runner now compares a no-checkpoint baseline with DraftGuard's checkpointed recovery under deterministic synthetic workloads. It reports recovery success, rollback latency, false rollback rate, a character-based lost-work proxy, post-recovery synthetic quality, missing-checkpoint detection, and fallback from a corrupted newest safe checkpoint.
+
+Run from `Backend/`:
+
+```powershell
+python run_evaluation.py --repetitions 10 --output data/step10_experiment.sqlite3
+```
+
+See [`STEP10_EXPERIMENTAL_EVALUATION.md`](STEP10_EXPERIMENTAL_EVALUATION.md) and [`STEP10_REFERENCE_RESULTS.json`](STEP10_REFERENCE_RESULTS.json) for metric definitions and a reference run. These are deterministic synthetic experiments, not real-world safety or semantic-quality benchmarks.
+
+## Step 11 — Provenance and responsible-AI audit
+
+The SQLite event log now retains generation prompts and outputs, provider and
+model identifiers (and version metadata when supplied by the provider),
+deterministic and semantic evaluator versions, scores, checks, findings, policy
+decisions, checkpoint IDs, parent lineage, and snapshot integrity outcomes.
+Human approve/reject records include the reviewer, reason, and timestamp and
+are committed atomically with the checkpoint's review state. Rollback events
+record the requested and restored checkpoint, verification result, and outcome;
+generation, checkpoint-creation, and rollback failures are also persisted.
+
+The audit is append-only at the application workflow level; it is not a
+tamper-proof or cryptographically signed ledger. Prompt and output text are
+stored in the local SQLite database to support provenance review. API response
+contracts, the human approval gate, and verified-safe rollback selection are
+unchanged.
+
+### Step 11 validation
+
+Run `python -m pytest` from `Backend/`. The tests cover provenance contents,
+SQLite persistence across fresh app instances, approval and rejection records,
+rollback target and integrity outcomes, and generation/rollback failure events.
+Tests use fake providers. A live Ollama service and browser-based UI were not
+used as part of this validation.
+
+
+## Required architecture stack
+
+Production-stack mode uses MySQL metadata, a dedicated Git artifact repository, persistent Chroma evidence retrieval, Python orchestration, and local Ollama/Qwen. The deployment path requires explicit MySQL configuration and does not silently downgrade to SQLite. See `Backend/README.md` for setup and the explicit SQLite-only test mode.

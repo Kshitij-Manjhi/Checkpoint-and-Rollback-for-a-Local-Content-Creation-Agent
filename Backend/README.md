@@ -50,7 +50,34 @@ print(f"Rollback latency: {restored.rollback_latency_ms:.3f} ms")
 
 ## Current implementation boundary
 
-SQLite is used as a lightweight local experiment adapter so the first recovery tests run without a database server. The project brief's proposed MySQL metadata store and Git/object-store artifact storage remain possible later adapters; this choice is not a claim that the final storage architecture has been decided.
+The standalone checkpoint unit tests still use SQLite so they can run without a database server. The API's required deployment mode is `AGENT_RUNTIME_STORAGE=mysql`. In this mode it uses MySQL for task/checkpoint/audit metadata, a dedicated Git repository for checkpoint artifacts, persistent ChromaDB retrieval for task-scoped prior prompts/drafts, local Ollama/Qwen generation, and the Python orchestration harness. Chroma embeddings use deterministic local feature hashing, so no embedding model is downloaded.
+
+### Configure MySQL and run the required stack
+
+1. Install/start MySQL 8+ locally and create a database/user (replace the sample password):
+
+```sql
+CREATE DATABASE draftguard CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'draftguard'@'localhost' IDENTIFIED BY 'CHANGE_ME';
+GRANT ALL PRIVILEGES ON draftguard.* TO 'draftguard'@'localhost';
+```
+
+2. Copy `.env.example` to `.env` in this `Backend` directory and replace `CHANGE_ME` with your password. Alternatively, set the same variables in PowerShell. The app loads `.env` automatically if `python-dotenv` is installed. From this `Backend` directory:
+
+```powershell
+python -m pip install -e ".[test]"
+# If not using Backend/.env, set AGENT_RUNTIME_STORAGE and AGENT_RUNTIME_MYSQL_URL here.
+$env:AGENT_RUNTIME_STORAGE = "mysql"
+$env:AGENT_RUNTIME_MYSQL_URL = "mysql://draftguard:CHANGE_ME@127.0.0.1:3306/draftguard"
+$env:AGENT_RUNTIME_DATA_DIR = "runtime_data"
+$env:AGENT_ARTIFACT_GIT_DIR = "runtime_data/artifact_repository"
+$env:AGENT_EVIDENCE_DIR = "runtime_data/evidence_index"
+python -m uvicorn agent_runtime.api:app --host 127.0.0.1 --port 8000
+```
+
+Use a URL-encoded password if it contains URL-reserved characters. The MySQL adapter creates its tables at startup. Git must be installed and available on `PATH`. Ollama must be running locally for Qwen generation. ChromaDB persists locally in the configured evidence directory.
+
+`AGENT_RUNTIME_STORAGE=sqlite` is an explicit development/test-only mode; it does not enable the required MySQL/Git/Chroma stack. The application does not silently fall back to SQLite if MySQL configuration is missing. Unit tests using `SQLiteCheckpointStore` do not validate live MySQL connectivity.
 
 The `is_safe` flag is supplied by the caller in this step. It is not an AI safety judgement. The next step will define the evaluator contract and failure-injection scenarios.
 
@@ -404,3 +431,11 @@ unsafe checkpoint behavior, existing human approval/rejection, and rollback. The
 unit tests use fake providers and do not constitute a live Ollama quality benchmark.
 Record results from actual local Qwen runs separately before making claims about
 semantic accuracy or agreement with human reviewers.
+
+
+## Required stack integration notes
+
+- Checkpoint state includes retrieved evidence references and excerpts; audit events record Git artifact URIs/digests and retrieved evidence IDs.
+- Human review publishes the reviewed snapshot as a new Git commit to keep artifact versions aligned with updated metadata digests.
+- Chroma is task-scoped; deterministic feature-hashing embeddings are a lightweight local retrieval baseline, not a semantic embedding model.
+- Live MySQL, Ollama/Qwen, and end-to-end Chroma retrieval should be smoke-tested on the target machine after services and dependencies are installed.

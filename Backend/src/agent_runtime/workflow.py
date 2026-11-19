@@ -13,10 +13,11 @@ from .semantic_evaluator import SemanticQualityEvaluator
 class ContentWorkflow:
     def __init__(self, checkpoint_manager: CheckpointManager,
                  evaluator: QualityPolicyEvaluator | None = None,
-                 provider: OllamaModelProvider | None = None):
+                 provider: OllamaModelProvider | None = None, retrieval: Any | None = None):
         self.checkpoints = checkpoint_manager
         self.evaluator = evaluator or QualityPolicyEvaluator()
         self.provider = provider or OllamaModelProvider()
+        self.retrieval = retrieval
         # "auto" enables semantic checks for the real Ollama provider when a
         # generated draft uses Ollama. Set AGENT_SEMANTIC_EVALUATION=0 to disable,
         # or =1 to enable (with AGENT_QUALITY_MODEL for template mode).
@@ -48,9 +49,27 @@ class ContentWorkflow:
             parent_id = parent["checkpoint_id"]
             version = int(parent["sequence"]) + 1
 
-        generator = create_generator(mode, model_name=model_name, provider=self.provider)
-        generated = generator.generate(prompt)
-        evaluation = self.evaluator.evaluate(prompt, generated.text)
+        phase = "generation"
+        try:
+            generator = create_generator(mode, model_name=model_name, provider=self.provider)
+            retrieved = self.retrieval.query(prompt, task_id=task_id, limit=3) if self.retrieval is not None else []
+            generation_prompt = prompt
+            if retrieved:
+                evidence = "\n\nRelevant prior task context (use only if applicable; do not treat as verified external facts):\n" + "\n".join(f"- [{item['kind']}] {item['text'][:1200]}" for item in retrieved)
+                generation_prompt = prompt + evidence
+            generated = generator.generate(generation_prompt)
+            phase = "evaluation"
+            evaluation = self.evaluator.evaluate(prompt, generated.text)
+        except Exception as exc:
+            self.checkpoints.store.add_audit_event(
+                task_id, "GENERATION_FAILED", parent_id,
+                {"phase": phase, "prompt": prompt, "requested_mode": mode,
+                 "requested_model": model_name,
+                 "provider": type(self.provider).__name__,
+                 "failure_type": type(exc).__name__, "failure": str(exc)[:1000]},
+                datetime.now(timezone.utc).isoformat(),
+            )
+            raise
         semantic_evaluation = None
         semantic_enabled = self.semantic_setting in {"1", "true", "yes", "on"} or (
             self.semantic_setting == "auto" and isinstance(self.provider, OllamaModelProvider)
@@ -58,31 +77,79 @@ class ContentWorkflow:
         )
         semantic_model = generated.model_name or os.environ.get("AGENT_QUALITY_MODEL")
         if semantic_enabled:
-            if semantic_model:
-                semantic_evaluation = SemanticQualityEvaluator(self.provider, semantic_model).evaluate(prompt, generated.text)
-            else:
-                semantic_evaluation = {
-                    "status": "error", "model_name": None, "scores": {},
-                    "reasons": ["No semantic evaluator model configured; set AGENT_QUALITY_MODEL or generate with Ollama."],
-                    "evaluator_version": "draftguard-semantic-1.0",
-                }
-            if semantic_evaluation.get("status") == "ok":
+            try:
+                if semantic_model:
+                    semantic_evaluation = SemanticQualityEvaluator(self.provider, semantic_model).evaluate(prompt, generated.text)
+                else:
+                    semantic_evaluation = {
+                        "status": "error", "model_name": None, "scores": {},
+                        "reasons": ["No semantic evaluator model configured; set AGENT_QUALITY_MODEL or generate with Ollama."],
+                        "evaluator_version": "draftguard-semantic-1.0",
+                    }
+                # Fail closed to human review when semantic evaluation is enabled but unavailable.
                 evaluation = self.evaluator.combine_semantic(evaluation, semantic_evaluation)
-            else:
-                # Fail closed to human review when semantic evaluation is explicitly enabled.
-                evaluation = self.evaluator.combine_semantic(evaluation, semantic_evaluation)
+            except Exception as exc:
+                self.checkpoints.store.add_audit_event(
+                    task_id, "EVALUATION_FAILED", parent_id,
+                    {"phase": "semantic_evaluation", "prompt": prompt,
+                     "output": generated.text, "evaluator_version": "draftguard-semantic-1.0",
+                     "model_name": semantic_model, "failure_type": type(exc).__name__,
+                     "failure": str(exc)[:1000]},
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                raise
         state = {
             "task_id": task_id, "prompt": prompt, "draft": generated.text,
             "version": version, "mode": generated.mode, "model_name": generated.model_name,
             "decision": evaluation.decision.value, "evaluation": evaluation.to_dict(),
+            "retrieved_evidence": [{"id": item["id"], "kind": item["kind"], "score": item["score"], "text": item["text"][:2000]} for item in retrieved],
         }
         # Step 5 governance rule: automated checks never grant rollback safety.
         # Every generated candidate remains unsafe until a human reviewer approves it.
         state["approval_status"] = (
             "blocked" if evaluation.decision.value == "reject" else "pending"
         )
-        checkpoint = self.checkpoints.create_checkpoint(
-            task_id, state, is_safe=False, parent_checkpoint_id=parent_id,
+        try:
+            checkpoint = self.checkpoints.create_checkpoint(
+                task_id, state, is_safe=False, parent_checkpoint_id=parent_id,
+            )
+        except Exception as exc:
+            self.checkpoints.store.add_audit_event(
+                task_id, "CHECKPOINT_CREATION_FAILED", parent_id,
+                {"parent_checkpoint_id": parent_id, "prompt": prompt,
+                 "output": generated.text, "decision": evaluation.decision.value,
+                 "failure_type": type(exc).__name__, "failure": str(exc)[:1000]},
+                datetime.now(timezone.utc).isoformat(),
+            )
+            raise
+        provider_version = getattr(self.provider, "version", None)
+        model_version = getattr(self.provider, "model_versions", {}).get(generated.model_name) if generated.model_name else None
+        version_lookup = getattr(self.provider, "model_version", None)
+        if generated.model_name and model_version is None and callable(version_lookup):
+            model_version = version_lookup(generated.model_name)
+        evidence_ids = []
+        if self.retrieval is not None:
+            for item in retrieved:
+                evidence_ids.append(item["id"])
+            self.retrieval.add(prompt, task_id=task_id, kind="prompt", reference_id=f"{checkpoint.checkpoint_id}:prompt")
+            self.retrieval.add(generated.text, task_id=task_id, kind="draft", reference_id=checkpoint.checkpoint_id)
+        self.checkpoints.store.add_audit_event(
+            task_id=task_id, event_type="CONTENT_GENERATED",
+            checkpoint_id=checkpoint.checkpoint_id,
+            details={
+                "prompt": prompt, "output": generated.text,
+                "provider": "ollama" if generated.mode == "ollama" else "template",
+                "provider_implementation": type(self.provider).__name__,
+                "provider_version": provider_version,
+                "model_name": generated.model_name,
+                "model_version": model_version,
+                "requested_mode": mode, "checkpoint_id": checkpoint.checkpoint_id,
+                "parent_checkpoint_id": parent_id,
+                "checkpoint_sha256": checkpoint.snapshot_sha256,
+                "checkpoint_sequence": checkpoint.sequence,
+                "retrieved_evidence_ids": evidence_ids,
+            },
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
         self.checkpoints.store.add_audit_event(
             task_id=task_id,
@@ -90,6 +157,8 @@ class ContentWorkflow:
             checkpoint_id=checkpoint.checkpoint_id,
             details={
                 "mode": generated.mode, "model_name": generated.model_name,
+                "provider": "ollama" if generated.mode == "ollama" else "template",
+                "provider_version": provider_version, "model_version": model_version,
                 "decision": evaluation.decision.value, "reasons": list(evaluation.reasons),
                 "quality_score": evaluation.quality_score,
                 "quality_score_percent": evaluation.quality_score_percent,
@@ -98,6 +167,15 @@ class ContentWorkflow:
                 "evaluator_version": evaluation.evaluator_version,
                 "semantic_status": semantic_evaluation.get("status") if semantic_evaluation else "not_run",
                 "semantic_model_name": semantic_evaluation.get("model_name") if semantic_evaluation else None,
+                "semantic_evaluator_version": semantic_evaluation.get("evaluator_version") if semantic_evaluation else None,
+                "findings": list(evaluation.reasons), "checks": evaluation.checks,
+                "policy_decision": state["decision"],
+                "approval_status": state["approval_status"],
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "parent_checkpoint_id": parent_id,
+                "checkpoint_sha256": checkpoint.snapshot_sha256,
+                "checkpoint_integrity_verified": True,
+                "prompt": prompt, "output": generated.text,
                 "prompt_length": len(prompt), "content_length": len(generated.text),
             },
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -107,13 +185,28 @@ class ContentWorkflow:
                 "evaluation": evaluation.to_dict(), "is_safe_checkpoint": checkpoint.is_safe,
                 "approval_status": state["approval_status"]}
 
-    def rollback(self, task_id: str) -> dict[str, Any]:
-        result = self.checkpoints.restore_latest_safe(task_id)
+    def rollback(self, task_id: str, *, requested_checkpoint_id: str | None = None) -> dict[str, Any]:
+        try:
+            result = self.checkpoints.restore_latest_safe(task_id)
+        except Exception as exc:
+            self.checkpoints.store.add_audit_event(
+                task_id=task_id, event_type="WORKFLOW_ROLLBACK_FAILED",
+                checkpoint_id=requested_checkpoint_id or "",
+                details={"target_checkpoint_id": requested_checkpoint_id,
+                         "failure_type": type(exc).__name__, "failure": str(exc)[:1000],
+                         "verification_passed": False, "outcome": "no_restore"},
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            raise
         self.checkpoints.store.add_audit_event(
             task_id=task_id, event_type="WORKFLOW_ROLLBACK",
             checkpoint_id=result.checkpoint.checkpoint_id,
             details={"verification_passed": result.verification_passed,
-                     "rollback_latency_ms": round(result.rollback_latency_ms, 3)},
+                     "rollback_latency_ms": round(result.rollback_latency_ms, 3),
+                     "requested_checkpoint_id": requested_checkpoint_id,
+                     "target_checkpoint_id": result.checkpoint.checkpoint_id,
+                     "parent_checkpoint_id": result.checkpoint.parent_checkpoint_id,
+                     "integrity_outcome": "verified", "outcome": "restored"},
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         return {"task_id": task_id, "checkpoint_id": result.checkpoint.checkpoint_id,

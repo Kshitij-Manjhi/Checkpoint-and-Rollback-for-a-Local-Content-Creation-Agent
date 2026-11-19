@@ -204,6 +204,22 @@ class SQLiteCheckpointStore:
                 "UPDATE checkpoints SET snapshot_json = ?, snapshot_sha256 = ?, is_safe = ? WHERE checkpoint_id = ?",
                 (snapshot_json, digest, int(approved), checkpoint_id),
             )
+            connection.execute(
+                """INSERT INTO audit_events
+                   (task_id, event_type, checkpoint_id, details_json, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    row["task_id"],
+                    "HUMAN_REVIEW_APPROVED" if approved else "HUMAN_REVIEW_REJECTED",
+                    checkpoint_id,
+                    json.dumps({
+                        "reviewer": reviewer, "reason": reason,
+                        "approval_status": "approved" if approved else "rejected",
+                        "is_safe": approved,
+                    }, sort_keys=True),
+                    reviewed_at,
+                ),
+            )
             return {
                 "checkpoint_id": checkpoint_id, "task_id": row["task_id"],
                 "is_safe": approved, "approval_status": state["approval_status"],

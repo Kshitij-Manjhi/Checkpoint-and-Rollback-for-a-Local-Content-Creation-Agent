@@ -41,8 +41,9 @@ def _to_checkpoint(row: Any) -> Checkpoint:
 class CheckpointManager:
     """Creates versioned snapshots and restores the latest verified safe one."""
 
-    def __init__(self, store: SQLiteCheckpointStore):
+    def __init__(self, store: Any, artifact_store: Any | None = None):
         self.store = store
+        self.artifact_store = artifact_store
 
     def create_checkpoint(
         self,
@@ -68,7 +69,12 @@ class CheckpointManager:
             "is_safe": bool(is_safe),
             "created_at": created_at,
         }
+        artifact_uri = None
+        if self.artifact_store is not None:
+            artifact_uri = self.artifact_store.put(checkpoint_id, dict(state), digest)
         sequence = self.store.insert_checkpoint(record)
+        if artifact_uri:
+            self.store.add_audit_event(task_id, "ARTIFACT_VERSIONED", checkpoint_id, {"artifact_uri": artifact_uri, "artifact_sha256": digest}, created_at)
         return Checkpoint(
             checkpoint_id=checkpoint_id,
             task_id=task_id,
@@ -96,7 +102,12 @@ class CheckpointManager:
     def latest_verified_safe_checkpoint(self, task_id: str) -> Any | None:
         """Return newest integrity-verified safe checkpoint, skipping damaged candidates."""
         for row in self.store.list_safe_checkpoints(task_id):
-            if self._verified_state(row) is not None:
+            state = self._verified_state(row)
+            if state is not None:
+                if self.artifact_store is not None:
+                    artifact = self.artifact_store.get(row["checkpoint_id"])
+                    if not artifact or artifact.get("sha256") != row["snapshot_sha256"]:
+                        continue
                 return row
         return None
 
@@ -104,6 +115,12 @@ class CheckpointManager:
         started = time.perf_counter()
         candidates = self.store.list_safe_checkpoints(task_id)
         if not candidates:
+            self.store.add_audit_event(
+                task_id, "ROLLBACK_FAILED", "",
+                {"target_checkpoint_id": None, "verification_passed": False,
+                 "failure": "no_safe_checkpoint", "outcome": "no_restore"},
+                datetime.now(timezone.utc).isoformat(),
+            )
             raise CheckpointNotFoundError(f"No safe checkpoint exists for task '{task_id}'")
 
         row = None
@@ -111,6 +128,10 @@ class CheckpointManager:
         skipped = []
         for candidate in candidates:
             state = self._verified_state(candidate)
+            if state is not None and self.artifact_store is not None:
+                artifact = self.artifact_store.get(candidate["checkpoint_id"])
+                if not artifact or artifact.get("sha256") != candidate["snapshot_sha256"]:
+                    state = None
             if state is not None:
                 row, restored_state = candidate, state
                 break
@@ -123,6 +144,13 @@ class CheckpointManager:
             )
 
         if row is None:
+            self.store.add_audit_event(
+                task_id, "ROLLBACK_FAILED", "",
+                {"target_checkpoint_id": None, "verification_passed": False,
+                 "failure": "no_integrity_verified_safe_checkpoint",
+                 "skipped_corrupt_checkpoint_ids": skipped, "outcome": "no_restore"},
+                datetime.now(timezone.utc).isoformat(),
+            )
             raise SnapshotIntegrityError(
                 f"No integrity-verified safe checkpoint exists for task '{task_id}'"
             )
