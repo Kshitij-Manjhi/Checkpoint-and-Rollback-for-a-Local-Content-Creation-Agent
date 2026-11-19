@@ -167,10 +167,12 @@ print(result["state"]["model_name"])
 ```
 
 A first run creates an initial safe baseline. Each generated candidate is
-evaluated and checkpointed through the same `CheckpointManager`. Only an
-`accept` result is marked safe. Rejected or review-needed candidates are saved
-as unsafe checkpoints for traceability and cannot be selected by safe rollback.
-`workflow.rollback(task_id)` uses the same verified restore path from Step 1.
+evaluated and checkpointed through the same `CheckpointManager`. An `accept`
+result means eligible for human review; it does not make the candidate safe.
+Every generated candidate remains unsafe until a human reviewer approves it.
+Rejected candidates are blocked from normal approval, and review-needed
+candidates remain unsafe pending a human decision. `workflow.rollback(task_id)`
+uses the same verified restore path from Step 1.
 
 ### Quality and policy decisions
 
@@ -356,3 +358,49 @@ the reviewer string belongs to a real authorized person.
 ## Step 6 — Separate frontend
 
 The frontend is maintained in the sibling `Frontend/` folder at the project root. It is an independent browser UI and calls the FastAPI backend over HTTP. See the root `README.md` and `Frontend/README.md` for commands. The backend no longer serves static frontend files.
+
+## Step 7 — Quality Evaluation Engine
+
+The current workflow evaluates every generated draft before checkpointing it.
+The deterministic evaluator now reports five explainable dimensions on a 0–5
+scale: relevance, completeness, clarity, factual support, and style/format. Their
+initial weights are 30%, 25%, 20%, 15%, and 10%, respectively. The normalized
+`quality_score` field remains in the legacy 0–1 range for compatibility;
+`quality_score_percent` exposes the same weighted score on a 0–100 scale.
+These weights and heuristics are initial prototype settings and should be
+calibrated against a human-labelled evaluation set.
+
+### Optional semantic evaluation with local Ollama/Qwen
+
+When a real Ollama provider is used for `mode="ollama"`, semantic scoring runs
+automatically by default using the selected generation model. It asks the local
+model for JSON scores and short reasons. The response is validated before it is
+used. If the model returns malformed JSON, an invalid score, or an evaluation
+error, the candidate is routed to human review rather than being silently passed.
+
+Configuration:
+
+- `AGENT_SEMANTIC_EVALUATION=auto` (default): use semantic scoring for Ollama-generated drafts.
+- `AGENT_SEMANTIC_EVALUATION=1`: explicitly enable semantic scoring; in template mode, set `AGENT_QUALITY_MODEL` to an installed model name to request a semantic evaluation.
+- `AGENT_SEMANTIC_EVALUATION=0`: disable semantic scoring and use deterministic checks only.
+
+Semantic scoring is a model judgement, not independent verification of facts.
+The factual-support dimension remains unverified unless suitable source evidence
+is supplied and checked. Neither a high score nor the model evaluator can mark
+a checkpoint safe. The existing human review route remains the authority for
+approval, and rollback continues to restore only the latest integrity-verified
+safe checkpoint. Known hard policy markers still reject candidates and cannot
+be overridden by semantic scores.
+
+The generation response keeps its existing fields and adds `quality_score_percent`,
+`scores`, `evaluator_version`, `evaluation_mode`, and `semantic_evaluation` inside
+the existing evaluation object. The `CONTENT_EVALUATED` audit event records the
+scores, evaluation mode, semantic status, model name, decision, and reason codes.
+
+### Validation
+
+The test suite covers score structure, semantic JSON validation, evaluator failure,
+unsafe checkpoint behavior, existing human approval/rejection, and rollback. The
+unit tests use fake providers and do not constitute a live Ollama quality benchmark.
+Record results from actual local Qwen runs separately before making claims about
+semantic accuracy or agreement with human reviewers.

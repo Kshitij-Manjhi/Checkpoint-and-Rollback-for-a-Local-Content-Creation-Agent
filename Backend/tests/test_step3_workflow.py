@@ -110,3 +110,93 @@ def test_real_provider_reports_unavailable(monkeypatch):
     monkeypatch.setattr("agent_runtime.model_provider.urlopen", fail)
     with pytest.raises(OllamaUnavailableError):
         OllamaModelProvider().list_models()
+
+
+def test_quality_evaluation_returns_explainable_dimensions():
+    result = QualityPolicyEvaluator(min_characters=40).evaluate(
+        "Explain checkpoint integrity", 
+        "Checkpoint integrity uses a digest to detect changes.\n\n"
+        "Key points\n- Compare the digest before restoring a snapshot.\n"
+        "- Reject a checkpoint when verification fails."
+    )
+    assert 0 <= result.quality_score_percent <= 100
+    assert set(result.scores) == {"relevance", "completeness", "clarity", "factual_support", "style_format"}
+    assert result.to_dict()["evaluator_version"] == "draftguard-quality-1.0"
+    assert result.to_dict()["quality_score"] <= 1
+
+
+def test_semantic_evaluator_validates_json_and_scores():
+    from agent_runtime.semantic_evaluator import SemanticQualityEvaluator
+
+    class SemanticProvider:
+        def generate(self, model, prompt, *, system=None):
+            return json.dumps({
+                "scores": {name: 4 for name in ("relevance", "completeness", "clarity", "factual_support", "style_format")},
+                "reasons": ["Clear and relevant draft"],
+            })
+
+    result = SemanticQualityEvaluator(SemanticProvider(), "qwen3:4b").evaluate("Write an overview", "A draft")
+    assert result["status"] == "ok"
+    assert result["scores"]["relevance"] == 4
+
+
+def test_semantic_evaluator_failure_is_not_a_pass():
+    from agent_runtime.semantic_evaluator import SemanticQualityEvaluator
+
+    class BrokenProvider:
+        def generate(self, model, prompt, *, system=None):
+            return "not json"
+
+    semantic = SemanticQualityEvaluator(BrokenProvider(), "qwen3:4b").evaluate("prompt", "draft")
+    base = QualityPolicyEvaluator(min_characters=1).evaluate("prompt", "This is long enough to be reviewed by the evaluator.")
+    combined = QualityPolicyEvaluator(min_characters=1).combine_semantic(base, semantic)
+    assert semantic["status"] == "error"
+    assert combined.decision == Decision.NEEDS_HUMAN_REVIEW
+    assert "SEMANTIC_EVALUATION_UNAVAILABLE_OR_INVALID" in combined.reasons
+
+
+def test_semantic_failure_keeps_candidate_unsafe_and_routes_to_review(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_SEMANTIC_EVALUATION", "1")
+    workflow, store = runtime(tmp_path, FakeProvider())
+    result = workflow.generate("semantic-fail", "Explain checkpoint recovery", mode="ollama", model_name="qwen3:4b")
+    assert result["evaluation"]["evaluation_mode"] == "hybrid"
+    assert result["evaluation"]["semantic_evaluation"]["status"] == "error"
+    assert result["evaluation"]["decision"] == "needs_human_review"
+    assert result["is_safe_checkpoint"] is False
+    assert result["approval_status"] == "pending"
+    assert any(event["event_type"] == "CONTENT_EVALUATED" and event["details"]["semantic_status"] == "error"
+               for event in store.get_audit_events("semantic-fail"))
+
+
+def test_semantic_scores_cannot_override_hard_policy_rejection():
+    evaluator = QualityPolicyEvaluator(min_characters=1)
+    base = evaluator.evaluate("request", "This text says steal passwords and is long enough for a test.")
+    semantic = {
+        "status": "ok", "model_name": "qwen3:4b",
+        "scores": {name: 5 for name in ("relevance", "completeness", "clarity", "factual_support", "style_format")},
+        "reasons": [], "evaluator_version": "draftguard-semantic-1.0",
+    }
+    combined = evaluator.combine_semantic(base, semantic)
+    assert combined.decision == Decision.REJECT
+
+
+def test_real_ollama_provider_auto_runs_semantic_evaluation(tmp_path, monkeypatch):
+    provider = OllamaModelProvider()
+    responses = [
+        "A sufficiently detailed draft about checkpoint recovery with useful explanations and examples.",
+        json.dumps({
+            "scores": {name: 4 for name in ("relevance", "completeness", "clarity", "factual_support", "style_format")},
+            "reasons": ["Relevant and readable"],
+        }),
+    ]
+    def fake_generate(model, prompt, *, system=None):
+        return responses.pop(0)
+    monkeypatch.setattr(provider, "generate", fake_generate)
+    monkeypatch.delenv("AGENT_SEMANTIC_EVALUATION", raising=False)
+    workflow, _ = runtime(tmp_path, provider)
+    result = workflow.generate("auto-semantic", "Explain checkpoint recovery", mode="ollama", model_name="qwen3:4b")
+    assert result["evaluation"]["evaluation_mode"] == "hybrid"
+    assert result["evaluation"]["semantic_evaluation"]["status"] == "ok"
+    assert result["state"]["evaluation"]["evaluator_version"] == "draftguard-quality-1.0"
+    assert result["approval_status"] == "pending"
+    assert result["is_safe_checkpoint"] is False

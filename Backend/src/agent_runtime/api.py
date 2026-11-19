@@ -43,8 +43,8 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
 
     app = FastAPI(
         title="Checkpoint and Rollback Agent API",
-        description="Local-first content generation, deterministic evaluation, checkpointing, and recovery.",
-        version="0.5.0",
+        description="Local-first content generation, deterministic and optional local semantic evaluation, human-governed checkpointing, and recovery.",
+        version="0.6.0",
     )
     # The frontend is a separate project folder and runs on its own local dev server.
     # Restrict CORS to the expected local development origins; do not expose this API publicly.
