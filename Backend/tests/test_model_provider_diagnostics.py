@@ -43,6 +43,18 @@ def test_generation_ollama_error_body_is_not_treated_as_response(monkeypatch):
         OllamaModelProvider().generate("qwen3:4b", "hello")
 
 
+def test_generate_json_sends_schema_to_ollama(monkeypatch):
+    captured = {}
+    schema = {"type": "object", "properties": {"claims": {"type": "array"}}}
+    def respond(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse(json.dumps({"response": '{"claims":[]}'}).encode())
+    monkeypatch.setattr("agent_runtime.model_provider.urlopen", respond)
+    result = OllamaModelProvider().generate_json("qwen3:4b", "extract claims", schema=schema)
+    assert result == '{"claims":[]}'
+    assert captured["body"]["format"] == schema
+
+
 def test_model_discovery_http_error_includes_status(monkeypatch):
     def fail(*args, **kwargs):
         raise HTTPError("http://localhost:11434/api/tags", 503, "Unavailable", {}, None)

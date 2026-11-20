@@ -91,7 +91,7 @@ See [`STEP10_EXPERIMENTAL_EVALUATION.md`](STEP10_EXPERIMENTAL_EVALUATION.md) and
 
 ## Step 11 — Provenance and responsible-AI audit
 
-The SQLite event log now retains generation prompts and outputs, provider and
+The configured metadata database retains generation prompts and outputs, provider and
 model identifiers (and version metadata when supplied by the provider),
 deterministic and semantic evaluator versions, scores, checks, findings, policy
 decisions, checkpoint IDs, parent lineage, and snapshot integrity outcomes.
@@ -102,14 +102,14 @@ generation, checkpoint-creation, and rollback failures are also persisted.
 
 The audit is append-only at the application workflow level; it is not a
 tamper-proof or cryptographically signed ledger. Prompt and output text are
-stored in the local SQLite database to support provenance review. API response
+stored in the configured metadata database (MySQL in deployment, SQLite in local tests) to support provenance review. API response
 contracts, the human approval gate, and verified-safe rollback selection are
 unchanged.
 
 ### Step 11 validation
 
 Run `python -m pytest` from `Backend/`. The tests cover provenance contents,
-SQLite persistence across fresh app instances, approval and rejection records,
+metadata persistence across fresh app instances, approval and rejection records,
 rollback target and integrity outcomes, and generation/rollback failure events.
 Tests use fake providers. A live Ollama service and browser-based UI were not
 used as part of this validation.
@@ -118,6 +118,16 @@ used as part of this validation.
 ## Required architecture stack
 
 Production-stack mode uses MySQL metadata, a dedicated Git artifact repository, persistent Chroma evidence retrieval, Python orchestration, and local Ollama/Qwen. The deployment path requires explicit MySQL configuration and does not silently downgrade to SQLite. See `Backend/README.md` for setup and the explicit SQLite-only test mode.
+
+## Git-backed checkpoint artifacts
+
+Git is the sole checkpoint artifact backend. DraftGuard commits each checkpoint payload as `artifacts/<checkpoint_id>.json` in the dedicated repository configured by `AGENT_ARTIFACT_GIT_DIR`. MySQL records the exact `artifact_commit_hash` with each checkpoint row; human approval creates a new immutable commit for the reviewed snapshot, then records that hash alongside the approved metadata. Rejected and pending candidates may also have commits for provenance, but they are not eligible for recovery.
+
+Rollback checks safe checkpoints newest-first. For each candidate it verifies the metadata snapshot digest and JSON object, loads the artifact from the recorded commit (not the current `HEAD`), checks the checkpoint ID and SHA-256 digest, and compares the artifact state with the metadata snapshot. It atomically writes the verified state to `working/<sha256(task_id)>.json` inside the artifact repository and checks the restored digest again. A missing or damaged reference is audited and skipped; if no valid approved reference remains, rollback fails closed. Restore does not reset or rewrite Git history and does not push to any remote.
+
+Git commit failure prevents checkpoint metadata from being marked safe and records an `ARTIFACT_COMMIT_FAILED` audit event when metadata storage is available. If a Git commit succeeds but the following metadata transaction fails, DraftGuard attempts a `CHECKPOINT_METADATA_PERSIST_FAILED` or `CHECKPOINT_REVIEW_METADATA_FAILED` audit event; the Git commit remains unreferenced and is not eligible for rollback. Live MySQL and Ollama availability must be evaluated separately from the automated Git/SQLite integration tests.
+
+See [`HLD.md`](HLD.md) and [`LLD.md`](LLD.md) for the current architecture and recovery details. These documents describe the implementation, while the project-context planning file remains read-only reference material.
 
 
 ## Evidence-grounded factuality evaluation (FASTFACT-inspired prototype)

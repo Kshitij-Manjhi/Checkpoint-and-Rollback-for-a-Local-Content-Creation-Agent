@@ -2,6 +2,8 @@
 
 This is the first modular implementation step for **Checkpoint and Rollback for a Local Content-Creation Agent**.
 
+> **Current deployment architecture:** MySQL stores task/checkpoint/audit metadata, a dedicated Git repository stores checkpoint artifact commits, and ChromaDB stores task-scoped evidence for retrieval. SQLite examples below describe the isolated unit-test/development adapter. Git is the only checkpoint artifact backend; there is no separate JSON object store.
+
 ## Scope of this step
 
 - Create task-scoped, versioned checkpoints.
@@ -309,9 +311,9 @@ Run five repetitions per deterministic scenario:
 
 ### Integration notes and current boundaries
 
-- Task titles/creation metadata currently live in the API process memory. Checkpoints
-  and audit events are persisted in SQLite. A future task registry migration can
-  persist task titles and lifecycle metadata across restarts.
+- In deployment mode, task titles, checkpoint metadata, Git commit hashes, and audit
+  events are persisted in MySQL. SQLite is used explicitly for isolated development
+  and test runs; it does not silently replace MySQL in deployment mode.
 - `/api/checkpoints/{checkpoint_id}/rollback` identifies the task from the requested
   checkpoint and invokes the safe rollback policy. The runtime selects the latest
   verified safe checkpoint for that task; it does not promise arbitrary historical
@@ -435,8 +437,18 @@ semantic accuracy or agreement with human reviewers.
 
 ## Required stack integration notes
 
-- Checkpoint state includes retrieved evidence references and excerpts; audit events record Git artifact URIs/digests and retrieved evidence IDs.
-- Human review publishes the reviewed snapshot as a new Git commit to keep artifact versions aligned with updated metadata digests.
+- Each checkpoint snapshot is committed at `artifacts/<checkpoint_id>.json`; its
+  immutable Git commit hash is stored in checkpoint metadata. Human review commits a
+  new version of that file and records the reviewed commit hash with the new digest.
+- Rollback reads the exact recorded commit, validates JSON shape, checkpoint ID, and
+  SHA-256 against metadata, then atomically materializes the verified state under
+  `working/`. It never resets a branch, rewrites history, or pushes to a remote.
+- Missing or corrupt Git references are audited and skipped. Rollback fails closed
+  if no verified safe checkpoint can be materialized. Git and metadata writes are
+  separate systems: a failed metadata write after a successful Git commit can leave
+  an unreferenced commit, which is harmless but may require later cleanup.
+- Checkpoint state includes retrieved evidence references and excerpts; audit events
+  record commit hashes/digests and retrieved evidence IDs.
 - Chroma is task-scoped; deterministic feature-hashing embeddings are a lightweight local retrieval baseline, not a semantic embedding model.
 - Live MySQL, Ollama/Qwen, and end-to-end Chroma retrieval should be smoke-tested on the target machine after services and dependencies are installed.
 
@@ -444,3 +456,5 @@ semantic accuracy or agreement with human reviewers.
 ## Optional evidence-grounded factuality checks
 
 Set `AGENT_FACTUALITY_EVALUATION=1` and optionally `AGENT_FACTUALITY_MODEL=qwen3:4b` before starting the API. Add manually verified source passages through `POST /api/tasks/{task_id}/evidence` before generation. The factuality evaluator extracts claims, retrieves task-scoped evidence records, verifies claims against those records, and records claim verdicts/evidence in the checkpoint and audit event. A contradicted claim is rejected; insufficient evidence or evaluation errors require human review. This is a lightweight FASTFACT-inspired adaptation, not a reproduction of the paper. See the repository root README for the request example and limitations.
+
+The Ollama adapter sends the semantic and factuality evaluator calls with JSON-schema-constrained output. The evaluators still validate every returned field and fail closed if a model or Ollama version does not satisfy the schema. In the UI, an evaluation error is shown as **Failed** and the candidate remains in human review; it is never displayed as a successful factuality result.

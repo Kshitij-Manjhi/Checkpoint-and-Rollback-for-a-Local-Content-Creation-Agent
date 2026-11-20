@@ -28,6 +28,10 @@ class LocalEvidenceIndex:
         self.min_score = min_score
         self.client = chromadb.PersistentClient(path=str(self.directory))
         self.collection = self.client.get_or_create_collection(name='draftguard_evidence', metadata={'hnsw:space': 'cosine'}, embedding_function=None)
+    def health_check(self) -> dict[str, Any]:
+        """Check that the persistent Chroma collection can answer a metadata read."""
+        return {'adapter': 'chromadb-persistent', 'collection': self.collection.name,
+                'document_count': int(self.collection.count())}
     def _embed(self, text: str) -> list[float]:
         tokens = re.findall(r"[a-zA-Z0-9_]+", text.lower())
         features = tokens + [f'{a}_{b}' for a,b in zip(tokens, tokens[1:])]

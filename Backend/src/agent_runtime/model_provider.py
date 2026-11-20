@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import os
+from typing import Any
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
 
@@ -55,12 +56,15 @@ class OllamaModelProvider:
                 return str(digest) if digest else None
         return None
 
-    def generate(self, model: str, prompt: str, *, system: str | None = None) -> str:
+    def generate(self, model: str, prompt: str, *, system: str | None = None,
+                 format: str | dict[str, Any] | None = None) -> str:
         if not model or not model.strip():
             raise ValueError("A model name is required for Ollama generation")
         body = {"model": model, "prompt": prompt, "stream": False}
         if system:
             body["system"] = system
+        if format is not None:
+            body["format"] = format
         request = Request(
             self.base_url + "/api/generate",
             data=json.dumps(body).encode("utf-8"),
@@ -89,3 +93,8 @@ class OllamaModelProvider:
         if not isinstance(result, str) or not result.strip():
             raise OllamaUnavailableError("Ollama returned an empty response")
         return result.strip()
+
+    def generate_json(self, model: str, prompt: str, *, system: str | None = None,
+                      schema: dict[str, Any] | None = None) -> str:
+        """Ask Ollama to constrain its response to JSON or the supplied JSON schema."""
+        return self.generate(model, prompt, system=system, format=schema or "json")

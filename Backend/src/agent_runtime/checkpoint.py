@@ -38,6 +38,13 @@ def _to_checkpoint(row: Any) -> Checkpoint:
     )
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 class CheckpointManager:
     """Creates versioned snapshots and restores the latest verified safe one."""
 
@@ -71,10 +78,34 @@ class CheckpointManager:
         }
         artifact_uri = None
         if self.artifact_store is not None:
-            artifact_uri = self.artifact_store.put(checkpoint_id, dict(state), digest)
-        sequence = self.store.insert_checkpoint(record)
+            try:
+                artifact_uri = self.artifact_store.put(checkpoint_id, dict(state), digest)
+            except Exception as exc:
+                self.store.add_audit_event(
+                    task_id, "ARTIFACT_COMMIT_FAILED", checkpoint_id,
+                    {"snapshot_sha256": digest, "failure_type": type(exc).__name__,
+                     "failure": str(exc)[:1000], "outcome": "checkpoint_not_created"},
+                    created_at,
+                )
+                raise
+            record["artifact_commit_hash"] = artifact_uri
+        try:
+            sequence = self.store.insert_checkpoint(record)
+        except Exception as exc:
+            try:
+                self.store.add_audit_event(
+                    task_id, "CHECKPOINT_METADATA_PERSIST_FAILED", checkpoint_id,
+                    {"artifact_commit_hash": artifact_uri, "snapshot_sha256": digest,
+                     "failure_type": type(exc).__name__, "failure": str(exc)[:1000],
+                     "outcome": "unreferenced_git_commit" if artifact_uri else "no_checkpoint"},
+                    created_at,
+                )
+            except Exception:
+                pass
+            raise
         if artifact_uri:
-            self.store.add_audit_event(task_id, "ARTIFACT_VERSIONED", checkpoint_id, {"artifact_uri": artifact_uri, "artifact_sha256": digest}, created_at)
+            self.store.add_audit_event(task_id, "ARTIFACT_VERSIONED", checkpoint_id,
+                {"artifact_commit_hash": artifact_uri, "artifact_sha256": digest}, created_at)
         return Checkpoint(
             checkpoint_id=checkpoint_id,
             task_id=task_id,
@@ -105,8 +136,8 @@ class CheckpointManager:
             state = self._verified_state(row)
             if state is not None:
                 if self.artifact_store is not None:
-                    artifact = self.artifact_store.get(row["checkpoint_id"])
-                    if not artifact or artifact.get("sha256") != row["snapshot_sha256"]:
+                    artifact = self.artifact_store.get(row["checkpoint_id"], _row_value(row, "artifact_commit_hash"))
+                    if not artifact or artifact.get("sha256") != row["snapshot_sha256"] or artifact.get("state") != state:
                         continue
                 return row
         return None
@@ -129,9 +160,24 @@ class CheckpointManager:
         for candidate in candidates:
             state = self._verified_state(candidate)
             if state is not None and self.artifact_store is not None:
-                artifact = self.artifact_store.get(candidate["checkpoint_id"])
-                if not artifact or artifact.get("sha256") != candidate["snapshot_sha256"]:
+                artifact = self.artifact_store.get(candidate["checkpoint_id"], _row_value(candidate, "artifact_commit_hash"))
+                if not artifact or artifact.get("sha256") != candidate["snapshot_sha256"] or artifact.get("state") != state:
                     state = None
+                else:
+                    try:
+                        restoration = self.artifact_store.restore(
+                            candidate["checkpoint_id"], _row_value(candidate, "artifact_commit_hash"),
+                            task_id, candidate["snapshot_sha256"],
+                        )
+                    except Exception as exc:
+                        state = None
+                        self.store.add_audit_event(
+                            task_id=task_id, event_type="ROLLBACK_CANDIDATE_REJECTED",
+                            checkpoint_id=candidate["checkpoint_id"],
+                            details={"verification_passed": False, "reason": "Git restoration failed",
+                                     "failure_type": type(exc).__name__, "failure": str(exc)[:1000]},
+                            created_at=datetime.now(timezone.utc).isoformat(),
+                        )
             if state is not None:
                 row, restored_state = candidate, state
                 break
@@ -162,7 +208,9 @@ class CheckpointManager:
             event_type="ROLLBACK_VERIFIED",
             checkpoint_id=checkpoint.checkpoint_id,
             details={"verification_passed": True, "rollback_latency_ms": round(elapsed_ms, 3),
-                     "skipped_corrupt_checkpoint_ids": skipped},
+                     "skipped_corrupt_checkpoint_ids": skipped,
+                     "artifact_commit_hash": _row_value(row, "artifact_commit_hash"),
+                     "restored_artifact": restoration if self.artifact_store is not None else None},
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         return RestoreResult(
@@ -171,4 +219,48 @@ class CheckpointManager:
             verification_passed=True,
             rollback_latency_ms=elapsed_ms,
         )
+
+    def review_checkpoint(self, checkpoint_id: str, *, approved: bool, reviewer: str,
+                          reason: str, reviewed_at: str) -> Any:
+        """Version review state first, then atomically publish the MySQL/SQLite metadata."""
+        record = self.store.get_checkpoint(checkpoint_id)
+        if record is None:
+            return None
+        state = record.get("state")
+        if not isinstance(state, dict) or not record.get("integrity_verified"):
+            raise SnapshotIntegrityError("Cannot review a checkpoint with a missing or corrupt snapshot")
+        reviewed_state = dict(state)
+        reviewed_state.update({
+            "approval_status": "approved" if approved else "rejected",
+            "reviewer": reviewer, "review_reason": reason, "reviewed_at": reviewed_at,
+        })
+        if self.artifact_store is not None:
+            digest = hashlib.sha256(_canonical_json(reviewed_state).encode("utf-8")).hexdigest()
+            try:
+                commit_hash = self.artifact_store.put(checkpoint_id, reviewed_state, digest)
+            except Exception as exc:
+                self.store.add_audit_event(
+                    record["task_id"], "ARTIFACT_REVIEW_COMMIT_FAILED", checkpoint_id,
+                    {"failure_type": type(exc).__name__, "failure": str(exc)[:1000],
+                     "outcome": "review_not_published"}, reviewed_at,
+                )
+                raise
+        else:
+            commit_hash = None
+        try:
+            return self.store.review_checkpoint(
+                checkpoint_id, approved=approved, reviewer=reviewer, reason=reason,
+                reviewed_at=reviewed_at, artifact_commit_hash=commit_hash,
+            )
+        except Exception as exc:
+            try:
+                self.store.add_audit_event(
+                    record["task_id"], "CHECKPOINT_REVIEW_METADATA_FAILED", checkpoint_id,
+                    {"artifact_commit_hash": commit_hash,
+                     "failure_type": type(exc).__name__, "failure": str(exc)[:1000],
+                     "outcome": "reviewed_git_commit_not_published"}, reviewed_at,
+                )
+            except Exception:
+                pass
+            raise
 

@@ -33,12 +33,16 @@ class SQLiteCheckpointStore:
                     parent_checkpoint_id TEXT,
                     snapshot_json TEXT NOT NULL,
                     snapshot_sha256 TEXT NOT NULL,
+                    artifact_commit_hash TEXT,
                     is_safe INTEGER NOT NULL CHECK (is_safe IN (0, 1)),
                     created_at TEXT NOT NULL,
                     UNIQUE(task_id, sequence)
                 )
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(checkpoints)")}
+            if "artifact_commit_hash" not in columns:
+                connection.execute("ALTER TABLE checkpoints ADD COLUMN artifact_commit_hash TEXT")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_checkpoints_task_safe_sequence "
                 "ON checkpoints(task_id, is_safe, sequence DESC)"
@@ -80,13 +84,13 @@ class SQLiteCheckpointStore:
                 """
                 INSERT INTO checkpoints (
                     checkpoint_id, task_id, sequence, parent_checkpoint_id,
-                    snapshot_json, snapshot_sha256, is_safe, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    snapshot_json, snapshot_sha256, artifact_commit_hash, is_safe, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record["checkpoint_id"], record["task_id"], record["sequence"],
                     record["parent_checkpoint_id"], record["snapshot_json"],
-                    record["snapshot_sha256"], int(record["is_safe"]),
+                    record["snapshot_sha256"], record.get("artifact_commit_hash"), int(record["is_safe"]),
                     record["created_at"],
                 ),
             )
@@ -175,7 +179,7 @@ class SQLiteCheckpointStore:
 
     def review_checkpoint(
         self, checkpoint_id: str, *, approved: bool, reviewer: str,
-        reason: str, reviewed_at: str,
+        reason: str, reviewed_at: str, artifact_commit_hash: str | None = None,
     ) -> dict[str, Any] | None:
         """Record a human decision in the snapshot and set its rollback eligibility."""
         import hashlib
@@ -201,8 +205,8 @@ class SQLiteCheckpointStore:
             snapshot_json = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             digest = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
             connection.execute(
-                "UPDATE checkpoints SET snapshot_json = ?, snapshot_sha256 = ?, is_safe = ? WHERE checkpoint_id = ?",
-                (snapshot_json, digest, int(approved), checkpoint_id),
+                "UPDATE checkpoints SET snapshot_json = ?, snapshot_sha256 = ?, artifact_commit_hash = COALESCE(?, artifact_commit_hash), is_safe = ? WHERE checkpoint_id = ?",
+                (snapshot_json, digest, artifact_commit_hash, int(approved), checkpoint_id),
             )
             connection.execute(
                 """INSERT INTO audit_events
@@ -215,7 +219,7 @@ class SQLiteCheckpointStore:
                     json.dumps({
                         "reviewer": reviewer, "reason": reason,
                         "approval_status": "approved" if approved else "rejected",
-                        "is_safe": approved,
+                        "is_safe": approved, "artifact_commit_hash": artifact_commit_hash,
                     }, sort_keys=True),
                     reviewed_at,
                 ),
@@ -247,6 +251,7 @@ class SQLiteCheckpointStore:
                 "sequence": row["sequence"],
                 "parent_checkpoint_id": row["parent_checkpoint_id"],
                 "snapshot_sha256": row["snapshot_sha256"],
+                "artifact_commit_hash": row["artifact_commit_hash"],
                 "is_safe": bool(row["is_safe"]),
                 "created_at": row["created_at"],
             }
@@ -276,6 +281,7 @@ class SQLiteCheckpointStore:
             "sequence": row["sequence"],
             "parent_checkpoint_id": row["parent_checkpoint_id"],
             "snapshot_sha256": row["snapshot_sha256"],
+            "artifact_commit_hash": row["artifact_commit_hash"],
             "is_safe": bool(row["is_safe"]),
             "created_at": row["created_at"],
             "integrity_verified": integrity_verified,

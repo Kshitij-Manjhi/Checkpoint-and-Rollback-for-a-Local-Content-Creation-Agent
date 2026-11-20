@@ -42,6 +42,29 @@ def test_supported_claim_must_cite_retrieved_evidence():
     assert result["claims"][0]["evidence"][0]["id"] == "source-1"
 
 
+def test_live_style_provider_is_asked_for_schema_constrained_json():
+    class StructuredProvider(SequenceProvider):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.schemas = []
+        def generate_json(self, model, prompt, *, system=None, schema=None):
+            self.schemas.append(schema)
+            return self.generate(model, prompt, system=system)
+
+    provider = StructuredProvider([
+        extraction("Git stores versioned artifacts."),
+        verification("supported", ["source-1"]),
+    ])
+    retrieval = FakeRetrieval([{"id": "source-1", "kind": "evidence",
+                                "text": "Git stores checkpoint artifacts.", "score": 0.9}])
+    result = EvidenceFactualityEvaluator(provider, "fake-model", retrieval).evaluate(
+        "Explain Git", "Git stores versioned artifacts.", task_id="task-1")
+    assert result["status"] == "ok"
+    assert provider.schemas[0]["required"] == ["claims"]
+    assert provider.schemas[0]["properties"]["claims"]["minItems"] == 1
+    assert set(provider.schemas[1]["required"]) == {"verdict", "evidence_ids", "reason"}
+
+
 def test_contradicted_claim_is_recorded_with_evidence():
     provider = SequenceProvider([
         extraction("The project stores passwords in plaintext."),
@@ -66,6 +89,19 @@ def test_missing_evidence_never_becomes_supported():
         "Check facts", "A claim without indexed evidence.", task_id="task-1")
     assert result["claims"][0]["verdict"] == "insufficient_evidence"
     base = QualityPolicyEvaluator(min_characters=1).evaluate("Check facts", "A sufficiently long draft that needs review.")
+    combined = QualityPolicyEvaluator(min_characters=1).combine_factuality(base, result)
+    assert combined.decision == Decision.NEEDS_HUMAN_REVIEW
+
+
+def test_empty_claim_extraction_is_unscored_and_routes_to_review():
+    provider = SequenceProvider([json.dumps({"claims": []})])
+    result = EvidenceFactualityEvaluator(provider, "fake-model", FakeRetrieval([])).evaluate(
+        "Check the factual claims", "DraftGuard stores checkpoint data in MySQL.", task_id="task-1")
+    assert result["status"] == "error"
+    assert result["claim_count"] == 0
+    assert "unscored" in result["reasons"][0]
+    base = QualityPolicyEvaluator(min_characters=1).evaluate(
+        "Check the factual claims", "DraftGuard stores checkpoint data in MySQL.")
     combined = QualityPolicyEvaluator(min_characters=1).combine_factuality(base, result)
     assert combined.decision == Decision.NEEDS_HUMAN_REVIEW
 

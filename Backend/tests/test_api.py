@@ -29,6 +29,41 @@ def test_health_and_dynamic_models(tmp_path):
     assert client.get("/api/models").json()["models"] == ["qwen3:4b", "qwen3:8b"]
 
 
+def test_integration_health_reports_real_probe_states_not_assumptions(tmp_path, monkeypatch):
+    from agent_runtime.api import MySQLCheckpointStore
+
+    client = client_for(tmp_path)
+    workflow = client.app.state.workflow
+    class Probe:
+        def __init__(self, result=None, error=None): self.result, self.error = result, error
+        def health_check(self):
+            if self.error: raise self.error
+            return self.result or {}
+
+    workflow.checkpoints.store = object.__new__(MySQLCheckpointStore)
+    monkeypatch.setattr(MySQLCheckpointStore, "health_check", lambda self: {"adapter": "mysql"})
+    workflow.retrieval = Probe({"adapter": "chromadb-persistent", "document_count": 1})
+    workflow.checkpoints.artifact_store = Probe({"adapter": "git", "has_commits": True, "head": "abc123"})
+    checks = client.get("/api/health/integrations").json()
+    assert checks["metadata"]["status"] == "connected"
+    assert checks["evidence"]["status"] == "connected"
+    assert checks["artifacts"]["status"] == "connected"
+
+    workflow.checkpoints.store.health_check = lambda: (_ for _ in ()).throw(ConnectionError("offline"))
+    checks = client.get("/api/health/integrations").json()
+    assert checks["metadata"]["status"] == "failed"
+    assert checks["metadata"]["error"] == "ConnectionError"
+
+
+def test_integration_health_reports_sqlite_and_missing_services(tmp_path):
+    client = client_for(tmp_path)
+    checks = client.get("/api/health/integrations").json()
+    assert checks["metadata"]["status"] == "not_configured"
+    assert checks["metadata"]["adapter"] == "sqlite"
+    assert checks["evidence"]["status"] == "not_configured"
+    assert checks["artifacts"]["status"] == "not_configured"
+
+
 def test_task_generation_checkpoints_and_events(tmp_path):
     client = client_for(tmp_path)
     created = client.post("/api/tasks", json={"task_id": "api-task", "title": "API test"})

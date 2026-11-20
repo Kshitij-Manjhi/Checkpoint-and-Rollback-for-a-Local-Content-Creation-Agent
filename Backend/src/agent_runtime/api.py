@@ -92,6 +92,51 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "checkpoint-rollback-agent"}
 
+    @app.get("/api/health/integrations")
+    def integration_health() -> dict[str, Any]:
+        """Probe configured storage adapters with read-only health checks."""
+        store = workflow.checkpoints.store
+        if isinstance(store, MySQLCheckpointStore):
+            try:
+                metadata = {"status": "connected", **store.health_check()}
+            except Exception as exc:
+                metadata = {"status": "failed", "adapter": "mysql",
+                            "error": type(exc).__name__}
+        elif isinstance(store, SQLiteCheckpointStore):
+            metadata = {"status": "not_configured", "adapter": "sqlite",
+                        "message": "This runtime is using SQLite; MySQL is not configured."}
+        else:
+            metadata = {"status": "not_configured", "adapter": type(store).__name__}
+
+        retrieval = workflow.retrieval
+        if retrieval is None:
+            evidence = {"status": "not_configured", "adapter": None}
+        else:
+            checker = getattr(retrieval, "health_check", None)
+            if not callable(checker):
+                evidence = {"status": "not_configured", "adapter": type(retrieval).__name__}
+            else:
+                try:
+                    evidence = {"status": "connected", **checker()}
+                except Exception as exc:
+                    evidence = {"status": "failed", "adapter": type(retrieval).__name__,
+                                "error": type(exc).__name__}
+
+        artifact_store = workflow.checkpoints.artifact_store
+        if artifact_store is None:
+            artifacts = {"status": "not_configured", "adapter": None}
+        else:
+            checker = getattr(artifact_store, "health_check", None)
+            if not callable(checker):
+                artifacts = {"status": "not_configured", "adapter": type(artifact_store).__name__}
+            else:
+                try:
+                    artifacts = {"status": "connected", **checker()}
+                except Exception as exc:
+                    artifacts = {"status": "failed", "adapter": type(artifact_store).__name__,
+                                 "error": type(exc).__name__}
+        return {"metadata": metadata, "evidence": evidence, "artifacts": artifacts}
+
     @app.get("/api/models")
     def models() -> dict[str, Any]:
         try:
@@ -204,20 +249,17 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
             raise HTTPException(status_code=409, detail="Automated policy rejection cannot be approved through the normal review route")
         approved = request.decision == "approve"
         reviewed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
-        result = workflow.checkpoints.store.review_checkpoint(
-            checkpoint_id, approved=approved, reviewer=request.reviewer.strip(),
-            reason=request.reason.strip(), reviewed_at=reviewed_at,
-        )
+        try:
+            result = workflow.checkpoints.review_checkpoint(
+                checkpoint_id, approved=approved, reviewer=request.reviewer.strip(),
+                reason=request.reason.strip(), reviewed_at=reviewed_at,
+            )
+        except SnapshotIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Could not commit reviewed artifact: {type(exc).__name__}") from exc
         if result is None:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
-        # Human review mutates the snapshot; publish the reviewed state as a new Git commit.
-        manager = workflow.checkpoints
-        if manager.artifact_store is not None:
-            refreshed = manager.store.get_checkpoint(checkpoint_id)
-            if refreshed and refreshed.get("state") is not None:
-                uri = manager.artifact_store.put(checkpoint_id, refreshed["state"], refreshed["snapshot_sha256"])
-                manager.store.add_audit_event(refreshed["task_id"], "ARTIFACT_VERSIONED_AFTER_REVIEW", checkpoint_id,
-                    {"artifact_uri": uri, "artifact_sha256": refreshed["snapshot_sha256"], "review_decision": request.decision}, reviewed_at)
         return result
 
     @app.post("/api/checkpoints/{checkpoint_id}/rollback")

@@ -151,6 +151,7 @@ def test_semantic_evaluator_failure_is_not_a_pass():
     base = QualityPolicyEvaluator(min_characters=1).evaluate("prompt", "This is long enough to be reviewed by the evaluator.")
     combined = QualityPolicyEvaluator(min_characters=1).combine_semantic(base, semantic)
     assert semantic["status"] == "error"
+    assert "model response did not contain a JSON object" in semantic["reasons"][0]
     assert combined.decision == Decision.NEEDS_HUMAN_REVIEW
     assert "SEMANTIC_EVALUATION_UNAVAILABLE_OR_INVALID" in combined.reasons
 
@@ -189,7 +190,9 @@ def test_real_ollama_provider_auto_runs_semantic_evaluation(tmp_path, monkeypatc
             "reasons": ["Relevant and readable"],
         }),
     ]
-    def fake_generate(model, prompt, *, system=None):
+    formats = []
+    def fake_generate(model, prompt, *, system=None, format=None):
+        formats.append(format)
         return responses.pop(0)
     monkeypatch.setattr(provider, "generate", fake_generate)
     monkeypatch.delenv("AGENT_SEMANTIC_EVALUATION", raising=False)
@@ -197,6 +200,8 @@ def test_real_ollama_provider_auto_runs_semantic_evaluation(tmp_path, monkeypatc
     result = workflow.generate("auto-semantic", "Explain checkpoint recovery", mode="ollama", model_name="qwen3:4b")
     assert result["evaluation"]["evaluation_mode"] == "hybrid"
     assert result["evaluation"]["semantic_evaluation"]["status"] == "ok"
+    assert formats[0] is None
+    assert formats[1]["type"] == "object"
     assert result["state"]["evaluation"]["evaluator_version"] == "draftguard-quality-1.0"
     assert result["approval_status"] == "pending"
     assert result["is_safe_checkpoint"] is False
