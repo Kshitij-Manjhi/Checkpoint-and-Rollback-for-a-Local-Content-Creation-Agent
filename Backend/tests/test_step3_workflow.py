@@ -184,6 +184,7 @@ def test_semantic_scores_cannot_override_hard_policy_rejection():
 def test_real_ollama_provider_auto_runs_semantic_evaluation(tmp_path, monkeypatch):
     provider = OllamaModelProvider()
     responses = [
+        json.dumps({"steps": ["Review the request", "Draft from supplied context"]}),
         "A sufficiently detailed draft about checkpoint recovery with useful explanations and examples.",
         json.dumps({
             "scores": {name: 4 for name in ("relevance", "completeness", "clarity", "factual_support", "style_format")},
@@ -200,8 +201,11 @@ def test_real_ollama_provider_auto_runs_semantic_evaluation(tmp_path, monkeypatc
     result = workflow.generate("auto-semantic", "Explain checkpoint recovery", mode="ollama", model_name="qwen3:4b")
     assert result["evaluation"]["evaluation_mode"] == "hybrid"
     assert result["evaluation"]["semantic_evaluation"]["status"] == "ok"
-    assert formats[0] is None
-    assert formats[1]["type"] == "object"
+    assert formats[0]["required"] == ["steps"]
+    assert formats[1] is None
+    assert formats[2]["type"] == "object"
     assert result["state"]["evaluation"]["evaluator_version"] == "draftguard-quality-1.0"
+    assert result["state"]["agent_plan"]["steps"] == ["Review the request", "Draft from supplied context"]
+    assert result["state"]["execution_context"]["user_prompt"] == "Explain checkpoint recovery"
     assert result["approval_status"] == "pending"
     assert result["is_safe_checkpoint"] is False

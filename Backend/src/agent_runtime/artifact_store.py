@@ -28,6 +28,10 @@ class GitArtifactStore:
         self._lock = threading.RLock()
         if not (self.repository_path / ".git").exists():
             self._run("init")
+        # Windows Git otherwise rejects object paths nested under long project
+        # or pytest temporary directories, even when artifact names are short.
+        if os.name == "nt":
+            self._run("config", "core.longpaths", "true")
         # Set identity locally so this repository does not depend on global Git config.
         if not self._run("config", "--get", "user.email", check=False):
             self._run("config", "user.email", os.environ.get("GIT_AUTHOR_EMAIL", "draftguard@localhost"))

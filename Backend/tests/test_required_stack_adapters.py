@@ -176,4 +176,21 @@ def test_workflow_records_retrieved_context_in_checkpoint_state(tmp_path):
                                QualityPolicyEvaluator(min_characters=40), retrieval=index)
     result = workflow.generate('retrieval-task', 'Explain checkpoint integrity', mode='no_llm')
     assert result['state']['retrieved_evidence'][0]['id'] == 'evidence-1'
+    assert result['state']['execution_context']['user_prompt'] == 'Explain checkpoint integrity'
+    assert result['state']['execution_context']['retrieved_items'][0]['id'] == 'evidence-1'
+    assert result['state']['agent_plan']['status'] == 'not_generated'
+    assert result['state']['execution_context']['conversation_history_included'] is False
     assert {item['kind'] for item in index.added} == {'prompt', 'draft'}
+
+
+def test_chroma_query_diagnostics_show_candidate_filter_counts(tmp_path):
+    pytest.importorskip('chromadb')
+    from agent_runtime.retrieval_store import LocalEvidenceIndex
+    index = LocalEvidenceIndex(tmp_path / 'chroma-diagnostics', min_score=0.2)
+    index.add('DraftGuard stores checkpoint artifacts in Git and MySQL records audit metadata.',
+              task_id='task-a', kind='evidence', reference_id='source-1')
+    result = index.query_detailed('DraftGuard stores checkpoint artifacts in Git.', task_id='task-a', limit=5)
+    assert result['diagnostics']['candidate_count'] == 1
+    assert result['diagnostics']['eligible_passage_count'] == 1
+    assert result['items'][0]['id'] == 'source-1'
+    assert result['diagnostics']['candidates'][0]['id'] == 'source-1'

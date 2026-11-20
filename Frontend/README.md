@@ -56,7 +56,7 @@ python -m http.server 5500 --bind 127.0.0.1
    inspect its returned trials. This is distinct from `pytest` and the local
    factuality smoke benchmark.
 
-The interface includes a writing-first composer, word and prompt counters, local model selection, human review dialog, checkpoint inspection, rollback, and audit/evaluation views. The backend allows CORS only for the expected localhost development origins. Keep both services bound to localhost. This is a research prototype: task title history is held in browser session memory/API process memory, reviewer names are not authenticated, and automated checks do not guarantee factual correctness.
+The interface includes a writing-first composer, word and prompt counters, local model selection, human review dialog, checkpoint inspection, rollback, service checks, and audit/evaluation views. The backend allows CORS only for the expected localhost development origins. Keep both services bound to localhost. This is a research prototype: task title history is held in browser session memory/API process memory, reviewer names are not authenticated, and automated checks do not guarantee factual correctness.
 
 Generated versions now display an automatic quality panel with a weighted score,
 per-dimension ratings, rule findings, and semantic-evaluator status. When the
@@ -67,36 +67,43 @@ only. The score is advisory and does not bypass the human approval gate.
 ## Testing and result views
 
 The **Audit & evaluation** view calls `/api/health`, `/api/health/integrations`,
-`/api/models`, `/api/tasks/{task_id}/events`, and `/api/evaluations/run`. MySQL,
-ChromaDB, and Git statuses come from read-only checks against the configured
-adapters. A service marked **Not configured** is not enabled for the current
-backend mode; a failed check is displayed as **Unavailable**. Git health checks
-repository access and report whether a commit exists, without changing history.
+`/api/models`, `/api/tasks/{task_id}/events`, `/api/evaluations/run`, and the
+evaluation history/report routes. MySQL checks confirm connectivity and required
+tables, Chroma checks the configured persistent collection, and Git checks the
+configured artifact repository. These are availability checks; the Chroma count
+does not prove that a particular query will retrieve relevant evidence.
 
-The recovery experiment view renders the returned synthetic scenario trials,
-outcomes, and rollback timings. It is not the automated pytest suite or the
-factuality benchmark. Unit tests remain a backend terminal operation:
+Use **Recovery Metrics** to inspect the selected persisted run. It shows all five
+metrics with units, denominators, definitions, and unavailable reasons. The run
+table includes expected versus actual outcomes and checkpoint references. Reports
+are retrieved from SQL and can be opened as JSON. Recovery experiments are
+controlled synthetic trials and are distinct from `pytest` and factuality tests.
 
-```powershell
-cd Backend
-python -m pytest -q
-```
+**Run automated tests** invokes a fixed `python -m pytest -q` command with
+isolated temporary test storage and a timeout; no command or test path is accepted
+from the browser. **Run factuality benchmark** uses the fixed smoke dataset, a
+selected installed Ollama model, and a temporary Chroma collection. Both save
+their actual status and output in the configured SQL store. These diagnostic runs
+do not use the user's task evidence collection.
 
-The fixed factuality smoke benchmark also remains a backend CLI operation:
+Generated factuality evaluations appear in the writing studio and checkpoint
+inspection. The UI displays actual verdicts, cited evidence IDs/passages, claim
+retrieval candidate counts, threshold-filter counts, eligible passage counts,
+model/evaluator identifiers, and explicit errors. Empty claim extraction is an
+unscored failure and routes the candidate to human review. The UI does not
+substitute benchmark results for a live draft evaluation.
 
-```powershell
-cd Backend
-python run_factuality_benchmark.py --model qwen3:4b --timeout 180
-```
+**Load Demo Scenario** creates or reuses one reserved demo workspace and indexes
+the supplied passage in the configured task-scoped evidence adapter. It fills the
+prompt and source fields, but does not generate, approve, or roll back content.
+Review and confirm those actions yourself. The demo source ID is stable, so
+repeated setup does not duplicate the workspace or passage. There is no reset
+button because deleting demo data from a shared local service needs a separate
+ownership-safe cleanup path.
 
-Generated factuality evaluations appear in the writing studio and when inspecting
-their checkpoint. The UI displays the actual verdict, cited evidence IDs and
-passages, model, evaluator version, and explicit errors from the checkpoint data.
-It does not substitute benchmark numbers or treat evaluation errors as passes.
-Use the **Evidence sources** form within a workspace to send passages through the
-existing `POST /api/tasks/{task_id}/evidence` route; an explicit API success is
-shown before generation. Evidence remains task-scoped. Factuality extraction
-must return at least one claim. An empty claim list is unscored and requires
-human review; it is not reported as a completed check.
-The checkpoint table displays the Git commit, snapshot SHA-256, timestamp, review
-state, integrity state, and recovery eligibility returned by the backend API.
+Checkpoint inspection identifies the saved plan status/steps, submitted prompt,
+retrieved evidence references/excerpts, draft, evaluations, decision, and review
+state. Conversation history is deliberately not captured. Common credential
+patterns are redacted from snapshot strings; this is not a general-purpose secret
+scanner. The checkpoint table displays Git commit, SHA-256, timestamp, review,
+integrity, and recovery eligibility returned by the backend.

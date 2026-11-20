@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -24,6 +25,43 @@ def _canonical_json(state: Mapping[str, Any]) -> str:
         return json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("Checkpoint state must contain JSON-serializable values") from exc
+
+
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|password|passwd|secret)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+)
+
+
+def _redact_text(value: str) -> str:
+    redacted = value
+    redacted = _SECRET_PATTERNS[0].sub(lambda match: f"{match.group(1)}=[REDACTED]", redacted)
+    redacted = _SECRET_PATTERNS[1].sub("Bearer [REDACTED]", redacted)
+    redacted = _SECRET_PATTERNS[2].sub("[REDACTED_AWS_KEY]", redacted)
+    redacted = _SECRET_PATTERNS[3].sub("[REDACTED_API_KEY]", redacted)
+    return redacted
+
+
+def sanitize_checkpoint_state(value: Any) -> Any:
+    """Copy JSON-like checkpoint state while redacting common credential forms."""
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, list):
+        return [sanitize_checkpoint_state(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_checkpoint_state(item) for item in value]
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if re.search(r"(?i)(password|passwd|secret|api[_-]?key|access[_-]?token|credential)", key_text):
+                result[key_text] = "[REDACTED]" if item is not None else None
+            else:
+                result[key_text] = sanitize_checkpoint_state(item)
+        return result
+    return value
 
 
 def _to_checkpoint(row: Any) -> Checkpoint:
@@ -63,7 +101,8 @@ class CheckpointManager:
         if not task_id.strip():
             raise ValueError("task_id must not be empty")
 
-        snapshot_json = _canonical_json(state)
+        safe_state = sanitize_checkpoint_state(dict(state))
+        snapshot_json = _canonical_json(safe_state)
         digest = hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest()
         created_at = datetime.now(timezone.utc).isoformat()
         checkpoint_id = str(uuid.uuid4())
@@ -79,7 +118,7 @@ class CheckpointManager:
         artifact_uri = None
         if self.artifact_store is not None:
             try:
-                artifact_uri = self.artifact_store.put(checkpoint_id, dict(state), digest)
+                artifact_uri = self.artifact_store.put(checkpoint_id, safe_state, digest)
             except Exception as exc:
                 self.store.add_audit_event(
                     task_id, "ARTIFACT_COMMIT_FAILED", checkpoint_id,
@@ -234,6 +273,7 @@ class CheckpointManager:
             "approval_status": "approved" if approved else "rejected",
             "reviewer": reviewer, "review_reason": reason, "reviewed_at": reviewed_at,
         })
+        reviewed_state = sanitize_checkpoint_state(reviewed_state)
         if self.artifact_store is not None:
             digest = hashlib.sha256(_canonical_json(reviewed_state).encode("utf-8")).hexdigest()
             try:
@@ -249,7 +289,8 @@ class CheckpointManager:
             commit_hash = None
         try:
             return self.store.review_checkpoint(
-                checkpoint_id, approved=approved, reviewer=reviewer, reason=reason,
+                checkpoint_id, approved=approved, reviewer=reviewed_state["reviewer"],
+                reason=reviewed_state["review_reason"],
                 reviewed_at=reviewed_at, artifact_commit_hash=commit_hash,
             )
         except Exception as exc:

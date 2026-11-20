@@ -201,3 +201,51 @@ def test_evidence_endpoint_indexes_task_scoped_source(tmp_path):
     assert response.status_code == 201
     assert response.json()["evidence_id"] == "source-checkpoint-01"
     assert retrieval.items[0]["kind"] == "evidence"
+
+
+def test_demo_setup_is_idempotent_and_does_not_generate_or_approve(tmp_path):
+    class FakeRetrieval:
+        def __init__(self): self.items = {}
+        def add(self, text, *, task_id, kind, reference_id=None):
+            old = self.items.get(reference_id)
+            if old and old != (text, task_id, kind): raise ValueError("reference conflict")
+            self.items[reference_id] = (text, task_id, kind)
+            return reference_id
+    client = client_for(tmp_path)
+    retrieval = FakeRetrieval()
+    client.app.state.workflow.retrieval = retrieval
+    first = client.post("/api/demo/load", json={})
+    second = client.post("/api/demo/load", json={})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["created"] is True
+    assert second.json()["created"] is False
+    assert first.json()["task"] == second.json()["task"]
+    assert len(retrieval.items) == 1
+    assert first.json()["indexed"] is True
+    assert first.json()["generation_performed"] is False
+    assert first.json()["approval_performed"] is False
+    assert first.json()["rollback_performed"] is False
+
+
+def test_demo_setup_reports_unavailable_evidence_adapter(tmp_path):
+    client = client_for(tmp_path)
+    response = client.post("/api/demo/load", json={})
+    assert response.status_code == 503
+    assert "retrieval is not configured" in response.json()["detail"]
+
+
+def test_recovery_experiment_is_persisted_and_report_can_be_reloaded(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_RUNTIME_DATA_DIR", str(tmp_path / "isolated-runtime"))
+    client = client_for(tmp_path)
+    response = client.post("/api/evaluations/run", json={"repetitions": 1})
+    assert response.status_code == 200
+    report = response.json()
+    assert report["experiment_id"]
+    assert set(report["metrics"]) == {"recovery_success_rate", "rollback_latency_ms",
+                                       "lost_work_percentage", "false_rollback_trigger_rate",
+                                       "post_recovery_quality"}
+    history = client.get("/api/evaluations/runs").json()["runs"]
+    assert history[0]["experiment_id"] == report["experiment_id"]
+    loaded = client.get(f"/api/evaluations/runs/{report['experiment_id']}")
+    assert loaded.json()["trials"] == report["trials"]
+    assert client.get(f"/api/evaluations/runs/{report['experiment_id']}/report").json()["format"] == "application/json"

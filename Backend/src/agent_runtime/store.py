@@ -68,6 +68,9 @@ class SQLiteCheckpointStore:
                 )
                 """
             )
+            connection.execute("""CREATE TABLE IF NOT EXISTS evaluation_runs (
+                experiment_id TEXT PRIMARY KEY, started_at TEXT NOT NULL,
+                status TEXT NOT NULL, report_json TEXT NOT NULL)""")
 
     def insert_checkpoint(self, record: dict[str, Any]) -> int:
         # Reserve the next task-local sequence and insert the snapshot in one
@@ -237,6 +240,32 @@ class SQLiteCheckpointStore:
                 "UPDATE checkpoints SET snapshot_json = ? WHERE checkpoint_id = ?",
                 (snapshot_json, checkpoint_id),
             )
+
+    def inject_artifact_reference_fault(self, checkpoint_id: str, commit_hash: str) -> None:
+        """Synthetic experiment hook: point a trial checkpoint at a faulty Git ref."""
+        with self._connect() as connection:
+            connection.execute("UPDATE checkpoints SET artifact_commit_hash=? WHERE checkpoint_id=?",
+                               (commit_hash, checkpoint_id))
+
+    def save_evaluation_run(self, report: dict[str, Any]) -> None:
+        import json
+        with self._connect() as connection:
+            connection.execute("INSERT INTO evaluation_runs(experiment_id,started_at,status,report_json) VALUES(?,?,?,?)",
+                (report["experiment_id"], report["started_at"], report["status"],
+                 json.dumps(report, ensure_ascii=False, sort_keys=True)))
+
+    def list_evaluation_runs(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT experiment_id,started_at,status,report_json FROM evaluation_runs ORDER BY started_at DESC LIMIT ?",
+                                      (max(1, min(int(limit), 200)),)).fetchall()
+        return [{"experiment_id": row["experiment_id"], "started_at": row["started_at"],
+                 "status": row["status"], "report": json.loads(row["report_json"])} for row in rows]
+
+    def get_evaluation_run(self, experiment_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT report_json FROM evaluation_runs WHERE experiment_id=?",
+                                     (experiment_id,)).fetchone()
+        return json.loads(row["report_json"]) if row else None
 
     def list_checkpoints(self, task_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:

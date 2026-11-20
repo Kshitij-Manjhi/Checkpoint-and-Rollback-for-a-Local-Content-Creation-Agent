@@ -30,17 +30,24 @@ class MySQLCheckpointStore:
         self._initialize()
     def _connect(self): return _Connection(self._connector.connect(**self._config))
     def health_check(self):
-        """Verify MySQL connectivity using a read-only statement."""
+        """Verify connectivity and the required metadata tables without writing."""
         with self._connect() as c:
             row = c.execute('SELECT 1 AS ok').fetchone()
+            required = {"tasks", "checkpoints", "audit_events", "evaluation_runs"}
+            tables = {str(item.get("Tables_in_" + self._config["database"], ""))
+                      for item in c.execute("SHOW TABLES").fetchall()}
         if not row or int(row.get('ok', 0)) != 1:
             raise RuntimeError('MySQL health query returned an unexpected result')
-        return {'adapter': 'mysql'}
+        missing = sorted(required - tables)
+        if missing:
+            raise RuntimeError('Required MySQL tables are missing: ' + ', '.join(missing))
+        return {'adapter': 'mysql', 'schema_ready': True}
     def _initialize(self):
         statements = [
             "CREATE TABLE IF NOT EXISTS checkpoints (checkpoint_id VARCHAR(36) PRIMARY KEY, task_id VARCHAR(255) NOT NULL, sequence INT NOT NULL, parent_checkpoint_id VARCHAR(36) NULL, snapshot_json LONGTEXT NOT NULL, snapshot_sha256 CHAR(64) NOT NULL, artifact_commit_hash VARCHAR(64) NULL, is_safe TINYINT NOT NULL, created_at VARCHAR(40) NOT NULL, UNIQUE KEY uq_task_sequence(task_id,sequence), KEY idx_task_safe(task_id,is_safe,sequence))",
             "CREATE TABLE IF NOT EXISTS tasks (task_id VARCHAR(255) PRIMARY KEY, title VARCHAR(500) NOT NULL, created_at VARCHAR(40) NOT NULL)",
             "CREATE TABLE IF NOT EXISTS audit_events (event_id BIGINT AUTO_INCREMENT PRIMARY KEY, task_id VARCHAR(255) NOT NULL, event_type VARCHAR(100) NOT NULL, checkpoint_id VARCHAR(36) NULL, details_json LONGTEXT NOT NULL, created_at VARCHAR(40) NOT NULL, KEY idx_audit_task(task_id,event_id))"
+            ,"CREATE TABLE IF NOT EXISTS evaluation_runs (experiment_id VARCHAR(36) PRIMARY KEY, started_at VARCHAR(40) NOT NULL, status VARCHAR(32) NOT NULL, report_json LONGTEXT NOT NULL, KEY idx_evaluation_started(started_at))"
         ]
         with self._connect() as c:
             for statement in statements: c.execute(statement)
@@ -67,6 +74,23 @@ class MySQLCheckpointStore:
         with self._connect() as c: return c.execute('SELECT * FROM checkpoints WHERE task_id=? AND is_safe=1 ORDER BY sequence DESC LIMIT 1',(task_id,)).fetchone()
     def add_audit_event(self, task_id, event_type, checkpoint_id, details, created_at):
         with self._connect() as c: c.execute('INSERT INTO audit_events(task_id,event_type,checkpoint_id,details_json,created_at) VALUES(?,?,?,?,?)',(task_id,event_type,checkpoint_id or None,json.dumps(details,sort_keys=True),created_at))
+    def inject_artifact_reference_fault(self, checkpoint_id, commit_hash):
+        """Synthetic experiment hook: point a trial checkpoint at a faulty Git ref."""
+        with self._connect() as c:
+            c.execute('UPDATE checkpoints SET artifact_commit_hash=? WHERE checkpoint_id=?',(commit_hash,checkpoint_id))
+    def save_evaluation_run(self, report):
+        with self._connect() as c:
+            c.execute('INSERT INTO evaluation_runs(experiment_id,started_at,status,report_json) VALUES(?,?,?,?)',
+                      (report['experiment_id'],report['started_at'],report['status'],json.dumps(report,ensure_ascii=False,sort_keys=True)))
+    def list_evaluation_runs(self, limit=50):
+        with self._connect() as c:
+            rows=c.execute('SELECT experiment_id,started_at,status,report_json FROM evaluation_runs ORDER BY started_at DESC LIMIT ?',
+                           (max(1,min(int(limit),200)),)).fetchall()
+        return [{'experiment_id':r['experiment_id'],'started_at':r['started_at'],'status':r['status'],'report':json.loads(r['report_json'])} for r in rows]
+    def get_evaluation_run(self, experiment_id):
+        with self._connect() as c:
+            row=c.execute('SELECT report_json FROM evaluation_runs WHERE experiment_id=?',(experiment_id,)).fetchone()
+        return json.loads(row['report_json']) if row else None
     def get_audit_events(self, task_id):
         with self._connect() as c: rows=c.execute('SELECT * FROM audit_events WHERE task_id=? ORDER BY event_id',(task_id,)).fetchall()
         return [{'event_id':r['event_id'],'task_id':r['task_id'],'event_type':r['event_type'],'checkpoint_id':r['checkpoint_id'],'details':json.loads(r['details_json']),'created_at':r['created_at']} for r in rows]

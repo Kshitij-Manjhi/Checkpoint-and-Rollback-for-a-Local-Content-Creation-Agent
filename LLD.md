@@ -72,3 +72,17 @@ Missing commits, unreadable or malformed JSON, mismatched IDs/digests/state, and
 ## Tests and integration
 
 The automated suite exercises the checkpoint manager with SQLite metadata plus a real temporary Git repository, including approved version commits, modified working artifact recovery, exact content/digest verification, missing references, and failed commits. Deployment integration also depends on a reachable MySQL instance, an installed Git executable, and ChromaDB. Ollama smoke tests are live checks and should be reported separately from the test suite.
+
+## Provenance, factuality diagnostics, and demo setup
+
+Checkpoint state records the generated plan and execution context, including the submitted prompt, retrieved evidence references/excerpts, draft, quality evaluation, factuality evaluation, policy decision, model/version, and review state. Conversation history is not captured. Snapshot serialization redacts common credential-like keys and token strings; this is a narrow safeguard, not a general secret scanner. Chroma evidence remains in the retrieval index and the checkpoint holds only the selected evidence excerpts/references.
+
+Factuality retrieval diagnostics record candidate count, score filtering, lexical-overlap filtering, kind filtering, eligible evidence count, source IDs, and cited source IDs per claim. The deterministic Chroma adapter's default cosine-similarity cutoff is 0.30, calibrated against the fixed demo evidence and an unrelated query. A meaningful-token overlap gate rejects false neighbors caused by feature-hash collisions. Deployments can set a different cosine threshold when constructing the adapter. Empty claim extraction is an explicit failed/unscored outcome. Candidate passage retrieval and model verdicts are observable in the UI; the model verdict is not proof of general factual accuracy.
+
+The demo endpoint uses a fixed task ID, title, evidence reference, and passage. Repeated calls reuse the same task and identical passage; conflicting content under the same stable reference is an explicit error. It does not generate drafts, approve checkpoints, or trigger rollback.
+
+## Recovery experiment records
+
+An evaluation run stores its run ID, version, timestamps, scenario count, measured metrics and denominators, unavailable reasons, trial outcomes, checkpoint IDs, Git commit hashes, and integrity digests in the configured SQL store. The API supports historical run listing and JSON report retrieval. The five dashboard metrics are recovery success rate, rollback latency (mean/median and p95 when at least 20 samples exist), lost-work character proxy, false rollback rate against explicitly labelled healthy controls, and post-recovery quality from `QualityPolicyEvaluator`. Metrics with no eligible denominator are returned as unavailable rather than as invented zeroes. Synthetic failure runs use isolated temporary Git repositories and are not live production failures.
+
+Diagnostic endpoints accept no shell command, arbitrary test path, or arbitrary dataset. The automated suite runs through a fixed `python -m pytest` invocation with isolated SQLite test storage. The factuality benchmark uses fixed smoke cases and a temporary Chroma collection. These diagnostic datasets do not alter task evidence. Live integration status and benchmark outcomes must be reported separately from automated unit tests.

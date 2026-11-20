@@ -64,6 +64,8 @@ python -m pytest -q
 
 The test suite uses fake providers for predictable behavior. Passing unit tests does not establish live Ollama quality accuracy; run and label real examples separately for research evaluation.
 
+The current dashboard also provides a fixed automated-test runner, a separate local Ollama factuality smoke benchmark, integration availability probes, and persisted synthetic recovery experiment reports. See `Frontend/README.md`, `HLD.md`, `LLD.md`, and `STEP10_EXPERIMENTAL_EVALUATION.md` for the actual endpoint behavior, metric definitions, limitations, and reproducibility steps. Unit tests use temporary SQLite only as test infrastructure; deployment mode continues to require configured MySQL, persistent ChromaDB, and Git artifact storage.
+
 ## Step 9 — Persistence and reliability
 
 - Task IDs, titles, and creation timestamps are now stored in SQLite rather than only in API process memory.

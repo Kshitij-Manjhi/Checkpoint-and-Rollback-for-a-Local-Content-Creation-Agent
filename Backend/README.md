@@ -91,6 +91,16 @@ The `is_safe` flag is supplied by the caller in this step. It is not an AI safet
 4. A missing safe checkpoint produces an explicit error.
 5. A modified snapshot is rejected when its SHA-256 digest no longer matches.
 
+## Current dashboard, experiment, and diagnostic APIs
+
+The current UI includes the writing workspace, a reserved demo setup action, service checks, checkpoint inspection, test and factuality diagnostics, and recovery experiment history. `POST /api/demo/load` idempotently creates/reuses the reserved demo task and indexes its fixed source; it does not generate, approve, or restore content. Factuality results include claim-level retrieval diagnostics and source references. The deterministic Chroma adapter defaults to a 0.30 cosine-similarity cutoff and also requires meaningful-token overlap to reject feature-hash collisions. The demo's related claim queries pass while its unrelated control query is filtered; recalibrate retrieval for a different corpus. Empty claim extraction or evaluator failure is reported as unscored/failed.
+
+`POST /api/evaluations/run` runs labelled synthetic failure scenarios using an isolated Git artifact repository and persists the measured report in the configured metadata SQL store. `GET /api/evaluations/runs` lists historical runs and `GET /api/evaluations/runs/{run_id}/report` returns the JSON report. The five metrics are recovery success rate, rollback latency (mean/median and p95 only with at least 20 samples), lost-work character proxy, false rollback rate against labelled healthy controls, and post-recovery quality from the real deterministic `QualityPolicyEvaluator`. Each metric has a denominator and unavailable reason where applicable; synthetic scenario output must not be described as a live failure rate.
+
+`POST /api/diagnostics/tests` invokes a fixed pytest command with temporary SQLite test data. SQLite here is explicitly isolated test infrastructure; the running application remains configured for MySQL and does not fall back. `POST /api/diagnostics/factuality` runs a fixed smoke benchmark against a temporary Chroma collection and an installed local Ollama model. It does not test a task's evidence. Report automated suite results, live MySQL/Chroma probes, benchmark results, and full-stack workflow results separately.
+
+Before sharing a checkpoint or ZIP, remember that secret redaction catches common credential key names and token patterns only. It is not a general secret scanner. Checkpoint state records plan, prompt, retrieved evidence excerpts and IDs, draft, evaluator results, policy decision, model/version, and review state; it intentionally excludes conversation history. Chroma remains the source evidence index, while MySQL stores structured metadata and SQL audit/report records.
+
 
 ## Step 2 — Controlled failure simulation and evaluation
 

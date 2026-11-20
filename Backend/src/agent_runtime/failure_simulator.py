@@ -20,11 +20,26 @@ SCENARIOS = {
     "corrupted_snapshot": FailureScenario(
         "corrupted_snapshot", "Stored checkpoint bytes are modified after checkpoint creation.", True
     ),
-    "missing_checkpoint": FailureScenario(
-        "missing_checkpoint", "No safe checkpoint exists for the task.", True
+    "corrupted_checkpoint_artifact": FailureScenario(
+        "corrupted_checkpoint_artifact", "A Git checkpoint payload is corrupted after approval.", True
+    ),
+    "missing_checkpoint_artifact": FailureScenario(
+        "missing_checkpoint_artifact", "The recorded Git commit reference is unavailable.", True
+    ),
+    "failed_rollback_integrity": FailureScenario(
+        "failed_rollback_integrity", "Integrity validation prevents a restore.", True
+    ),
+    "unsupported_claim": FailureScenario(
+        "unsupported_claim", "A factual claim has no indexed evidence passage.", True
+    ),
+    "generation_interrupted": FailureScenario(
+        "generation_interrupted", "Generation stops before a candidate checkpoint is written.", True
     ),
     "healthy_candidate": FailureScenario(
-        "healthy_candidate", "Candidate passes the deterministic experimental checks.", False
+        "healthy_candidate", "Candidate passes the configured checks and should not roll back.", False
+    ),
+    "missing_checkpoint": FailureScenario(
+        "missing_checkpoint", "No safe checkpoint exists for the task.", True
     ),
 }
 

@@ -86,7 +86,19 @@ class EvidenceFactualityEvaluator:
 
             results = []
             for index, claim in enumerate(claims, start=1):
-                retrieved = self.retrieval.query(claim, task_id=task_id, limit=5)
+                detailed = getattr(self.retrieval, "query_detailed", None)
+                if callable(detailed):
+                    retrieval_result = detailed(claim, task_id=task_id, limit=5)
+                    retrieved = retrieval_result.get("items", [])
+                    retrieval_diagnostics = dict(retrieval_result.get("diagnostics") or {})
+                else:
+                    retrieved = self.retrieval.query(claim, task_id=task_id, limit=5)
+                    retrieval_diagnostics = {"candidate_count": len(retrieved),
+                                             "filtered_by_score_count": 0,
+                                             "min_score": None,
+                                             "candidates": [{"id": str(item.get("id", "")),
+                                                             "kind": item.get("kind"),
+                                                             "score": item.get("score")} for item in retrieved]}
                 evidence = [
                     {"id": item.get("id"), "text": str(item.get("text", ""))[:3000],
                      "score": item.get("score")}
@@ -94,10 +106,24 @@ class EvidenceFactualityEvaluator:
                     if item.get("kind") in {"evidence", "source", "reference", "document"}
                     and str(item.get("text", "")).strip()
                 ]
+                retrieval_diagnostics.update({
+                    "eligible_passage_count": len(evidence),
+                    "filtered_by_kind_or_empty_count": max(0, len(retrieved) - len(evidence)),
+                    "source_ids": [str(item["id"]) for item in evidence],
+                })
                 if not evidence:
+                    if retrieval_diagnostics.get("candidate_count", 0) == 0:
+                        reason = "No task-scoped retrieval candidates were returned."
+                    elif retrieval_diagnostics.get("filtered_by_score_count", 0):
+                        reason = "Retrieved candidates did not meet the configured relevance threshold."
+                    elif retrieval_diagnostics.get("filtered_by_lexical_count", 0):
+                        reason = "Retrieved candidates shared no meaningful terms with this claim."
+                    else:
+                        reason = "Candidates were returned, but none were eligible source passages."
                     results.append({"claim_id": f"claim-{index}", "claim": claim,
                                     "verdict": "insufficient_evidence", "evidence": [],
-                                    "reason": "No eligible evidence passages were retrieved."})
+                                    "cited_source_ids": [], "retrieval_diagnostics": retrieval_diagnostics,
+                                    "reason": reason})
                     continue
                 verification_prompt = json.dumps({"task": "Verify one claim strictly against the supplied evidence.",
                                 "claim": claim, "evidence": evidence,
@@ -131,6 +157,8 @@ class EvidenceFactualityEvaluator:
                 cited = [item for item in evidence if str(item["id"]) in cited_ids]
                 results.append({"claim_id": f"claim-{index}", "claim": claim,
                                 "verdict": verdict, "evidence": cited,
+                                "cited_source_ids": [str(item["id"]) for item in cited],
+                                "retrieval_diagnostics": retrieval_diagnostics,
                                 "reason": str(verified.get("reason", ""))[:800]})
             counts = {key: sum(row["verdict"] == key for row in results) for key in sorted(VERDICTS)}
             return {"status": "ok", "model_name": self.model_name,

@@ -1,6 +1,7 @@
 """FastAPI interface for the shared checkpoint/content workflow."""
 from __future__ import annotations
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Literal
@@ -46,6 +47,28 @@ class ReviewRequest(BaseModel):
 class EvidenceRequest(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
     reference_id: str | None = Field(default=None, max_length=300)
+
+
+class DiagnosticRequest(BaseModel):
+    model_name: str | None = Field(default=None, max_length=160)
+    timeout_seconds: int = Field(default=180, ge=30, le=300)
+
+
+_DIAGNOSTIC_LOCK = threading.Lock()
+DEMO_TASK_ID = "draftguard-demo-responsible-checkpoints-v1"
+DEMO_TITLE = "Demo: Responsible checkpoint recovery"
+DEMO_EVIDENCE_ID = "draftguard-demo-evidence-v1"
+DEMO_EVIDENCE = (
+    "DraftGuard stores checkpoint artifacts in Git and uses MySQL to maintain structured metadata and audit records. "
+    "Each checkpoint records its Git commit hash in the metadata. During recovery, DraftGuard validates the recorded "
+    "Git commit and the artifact's SHA-256 digest before restoring the approved content."
+)
+DEMO_PROMPT = (
+    "Explain how DraftGuard stores, approves, and recovers content checkpoints. Describe the role of Git in storing "
+    "versioned artifacts and the role of MySQL in tracking checkpoint metadata and audit records. Explain how Git "
+    "commit hashes and SHA-256 digests help verify checkpoint integrity during recovery. Use the supplied evidence "
+    "for factual claims and identify any claims that the evidence does not establish."
+)
 
 
 def create_app(database_path: str | Path | None = None, workflow: ContentWorkflow | None = None) -> FastAPI:
@@ -185,10 +208,46 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
                 reference_id=evidence_id,
             )
         except Exception as exc:
+            if isinstance(exc, ValueError):
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             raise HTTPException(status_code=500, detail=f"Could not index evidence: {type(exc).__name__}") from exc
         if not saved_id:
             raise HTTPException(status_code=422, detail="Evidence text must not be blank")
         return {"task_id": task_id, "evidence_id": saved_id, "kind": "evidence", "indexed": True}
+
+    @app.post("/api/demo/load")
+    def load_demo() -> dict[str, Any]:
+        """Idempotently prepare the named demo task and index its source; no generation/review/rollback."""
+        if workflow.retrieval is None:
+            raise HTTPException(status_code=503, detail="Demo evidence cannot be indexed: retrieval is not configured")
+        store = workflow.checkpoints.store
+        existing = store.get_task(DEMO_TASK_ID)
+        if existing and existing.get("title") != DEMO_TITLE:
+            raise HTTPException(status_code=409, detail="The reserved demo workspace ID is already used by another task")
+        created = False
+        if not existing:
+            created_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+            created = bool(store.create_task(DEMO_TASK_ID, DEMO_TITLE, created_at))
+            existing = store.get_task(DEMO_TASK_ID)
+            if not existing or existing.get("title") != DEMO_TITLE:
+                raise HTTPException(status_code=409, detail="Could not safely reserve the demo workspace")
+        try:
+            evidence_id = workflow.retrieval.add(DEMO_EVIDENCE, task_id=DEMO_TASK_ID,
+                                                 kind="evidence", reference_id=DEMO_EVIDENCE_ID)
+        except Exception as exc:
+            status = 409 if isinstance(exc, ValueError) else 503
+            raise HTTPException(status_code=status,
+                                detail=f"Demo evidence indexing failed ({type(exc).__name__}): {str(exc)[:250]}") from exc
+        prepared_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        store.add_audit_event(DEMO_TASK_ID, "DEMO_WORKSPACE_PREPARED", None,
+                              {"evidence_id": evidence_id, "indexed": True,
+                               "generation_performed": False, "approval_performed": False,
+                               "rollback_performed": False}, prepared_at)
+        return {"task": {"task_id": DEMO_TASK_ID, "title": DEMO_TITLE}, "created": created,
+                "prompt": DEMO_PROMPT, "evidence": DEMO_EVIDENCE,
+                "evidence_id": evidence_id, "indexed": bool(evidence_id),
+                "actions_performed": ["workspace_created_or_reused", "evidence_indexed"],
+                "generation_performed": False, "approval_performed": False, "rollback_performed": False}
 
     @app.post("/api/tasks/{task_id}/generate")
     def generate(task_id: str, request: GenerateRequest) -> dict[str, Any]:
@@ -304,12 +363,88 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
                 raise HTTPException(status_code=422, detail="repetitions must be an integer") from exc
         if repetitions < 1 or repetitions > 100:
             raise HTTPException(status_code=422, detail="repetitions must be between 1 and 100")
-        path = Path(os.environ.get("AGENT_EVALUATION_DB", "runtime_data/evaluation_api.sqlite3"))
+        path = Path(os.environ.get("AGENT_EVALUATION_REPORT_PATH", "runtime_data/evaluation_api.json"))
         try:
-            report = run_experiment(path, repetitions=repetitions)
+            data_dir = Path(os.environ.get("AGENT_RUNTIME_DATA_DIR", "runtime_data"))
+            factuality_enabled = os.environ.get("AGENT_FACTUALITY_EVALUATION", "0").strip().lower() in {"1", "true", "yes", "on"}
+            factuality_model = os.environ.get("AGENT_FACTUALITY_MODEL")
+            report = run_experiment(path, repetitions=repetitions,
+                metadata_store=workflow.checkpoints.store,
+                artifact_root=data_dir / "evaluation_artifacts",
+                evaluator=workflow.evaluator, provider=workflow.provider,
+                retrieval=workflow.retrieval, factuality_enabled=factuality_enabled,
+                factuality_model=factuality_model)
+            workflow.checkpoints.store.add_audit_event("system:evaluations", "EVALUATION_RUN_COMPLETED", None,
+                {"experiment_id": report["experiment_id"], "status": report["status"],
+                 "trial_count": report["total_trials"], "metrics": report["metrics"]}, report["finished_at"])
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return report
+
+    @app.get("/api/evaluations/runs")
+    def evaluation_runs(limit: int = 50) -> dict[str, Any]:
+        if limit < 1 or limit > 200:
+            raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+        getter = getattr(workflow.checkpoints.store, "list_evaluation_runs", None)
+        if not callable(getter):
+            raise HTTPException(status_code=503, detail="Configured SQL store does not support evaluation history")
+        return {"runs": getter(limit)}
+
+    @app.get("/api/evaluations/runs/{experiment_id}")
+    def evaluation_run(experiment_id: str) -> dict[str, Any]:
+        getter = getattr(workflow.checkpoints.store, "get_evaluation_run", None)
+        report = getter(experiment_id) if callable(getter) else None
+        if report is None:
+            raise HTTPException(status_code=404, detail="Evaluation run not found")
+        return report
+
+    @app.get("/api/evaluations/runs/{experiment_id}/report")
+    def evaluation_report(experiment_id: str) -> dict[str, Any]:
+        getter = getattr(workflow.checkpoints.store, "get_evaluation_run", None)
+        report = getter(experiment_id) if callable(getter) else None
+        if report is None:
+            raise HTTPException(status_code=404, detail="Evaluation report not found")
+        return {"report": report, "format": "application/json"}
+
+    @app.post("/api/diagnostics/tests")
+    def run_tests(request: DiagnosticRequest | None = None) -> dict[str, Any]:
+        timeout_seconds = request.timeout_seconds if request else 300
+        if not _DIAGNOSTIC_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="A diagnostic run is already in progress")
+        try:
+            from .diagnostics import run_pytest_suite
+            backend_dir = Path(__file__).resolve().parents[2]
+            report = run_pytest_suite(backend_dir, timeout_seconds=timeout_seconds)
+            workflow.checkpoints.store.save_evaluation_run(report)
+            workflow.checkpoints.store.add_audit_event("system:diagnostics", "PYTEST_RUN_COMPLETED", None,
+                {"run_id": report["experiment_id"], "status": report["status"], "counts": report["counts"]}, report["finished_at"])
+            return report
+        finally:
+            _DIAGNOSTIC_LOCK.release()
+
+    @app.post("/api/diagnostics/factuality")
+    def run_factuality_diagnostic(request: DiagnosticRequest | None = None) -> dict[str, Any]:
+        model = (request.model_name if request and request.model_name else
+                 os.environ.get("AGENT_FACTUALITY_MODEL", "qwen3:4b"))
+        timeout_seconds = request.timeout_seconds if request else 180
+        if not _DIAGNOSTIC_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="A diagnostic run is already in progress")
+        try:
+            try:
+                available = workflow.available_models()
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Ollama model discovery failed: {type(exc).__name__}") from exc
+            if model not in available:
+                raise HTTPException(status_code=422, detail=f"Requested factuality model is not installed: {model}")
+            from .diagnostics import run_factuality_benchmark
+            backend_dir = Path(__file__).resolve().parents[2]
+            report = run_factuality_benchmark(backend_dir, model, timeout_seconds=timeout_seconds)
+            workflow.checkpoints.store.save_evaluation_run(report)
+            workflow.checkpoints.store.add_audit_event("system:diagnostics", "FACTUALITY_BENCHMARK_COMPLETED", None,
+                {"run_id": report["experiment_id"], "status": report["status"], "model_name": model}, report["finished_at"])
+            return report
+        finally:
+            _DIAGNOSTIC_LOCK.release()
 
     @app.get("/api/tasks/{task_id}/events")
     def task_events(task_id: str) -> dict[str, Any]:
