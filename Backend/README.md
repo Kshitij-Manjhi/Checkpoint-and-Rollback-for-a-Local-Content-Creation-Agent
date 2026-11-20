@@ -439,3 +439,8 @@ semantic accuracy or agreement with human reviewers.
 - Human review publishes the reviewed snapshot as a new Git commit to keep artifact versions aligned with updated metadata digests.
 - Chroma is task-scoped; deterministic feature-hashing embeddings are a lightweight local retrieval baseline, not a semantic embedding model.
 - Live MySQL, Ollama/Qwen, and end-to-end Chroma retrieval should be smoke-tested on the target machine after services and dependencies are installed.
+
+
+## Optional evidence-grounded factuality checks
+
+Set `AGENT_FACTUALITY_EVALUATION=1` and optionally `AGENT_FACTUALITY_MODEL=qwen3:4b` before starting the API. Add manually verified source passages through `POST /api/tasks/{task_id}/evidence` before generation. The factuality evaluator extracts claims, retrieves task-scoped evidence records, verifies claims against those records, and records claim verdicts/evidence in the checkpoint and audit event. A contradicted claim is rejected; insufficient evidence or evaluation errors require human review. This is a lightweight FASTFACT-inspired adaptation, not a reproduction of the paper. See the repository root README for the request example and limitations.

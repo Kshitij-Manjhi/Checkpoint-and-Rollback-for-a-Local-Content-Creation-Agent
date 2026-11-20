@@ -138,3 +138,31 @@ def test_separate_frontend_origin_is_allowed_by_cors(tmp_path):
     )
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5500"
+
+
+
+def test_evidence_endpoint_indexes_task_scoped_source(tmp_path):
+    class FakeRetrieval:
+        def __init__(self):
+            self.items = []
+        def add(self, text, *, task_id, kind, reference_id=None):
+            self.items.append({"text": text, "task_id": task_id, "kind": kind, "id": reference_id})
+            return reference_id
+        def query(self, text, *, task_id, limit=3):
+            return [item for item in self.items if item["task_id"] == task_id][:limit]
+
+    store = SQLiteCheckpointStore(tmp_path / "evidence-api.sqlite3")
+    retrieval = FakeRetrieval()
+    workflow = ContentWorkflow(
+        CheckpointManager(store), QualityPolicyEvaluator(min_characters=40),
+        provider=FakeProvider(), retrieval=retrieval,
+    )
+    client = TestClient(create_app(workflow=workflow))
+    assert client.post("/api/tasks", json={"task_id": "evidence-task", "title": "Evidence test"}).status_code == 201
+    response = client.post("/api/tasks/evidence-task/evidence", json={
+        "text": "Checkpoint snapshots are protected with a SHA-256 digest.",
+        "reference_id": "source-checkpoint-01",
+    })
+    assert response.status_code == 201
+    assert response.json()["evidence_id"] == "source-checkpoint-01"
+    assert retrieval.items[0]["kind"] == "evidence"

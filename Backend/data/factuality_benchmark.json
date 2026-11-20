@@ -1,0 +1,45 @@
+{
+  "dataset_id": "draftguard-factuality-mini-v1",
+  "description": "Small manually authored smoke-test benchmark for the FASTFACT-inspired prototype. Not a statistically representative evaluation dataset.",
+  "cases": [
+    {
+      "case_id": "supported-checkpoint-hash",
+      "task_id": "benchmark-supported-checkpoint-hash",
+      "prompt": "Describe how DraftGuard verifies checkpoint integrity.",
+      "draft": "Checkpoint snapshots are protected with a SHA-256 digest.",
+      "evidence": [
+        {
+          "id": "src-checkpoint-hash-01",
+          "text": "Checkpoint snapshots are serialized as canonical JSON and protected with a SHA-256 digest. The runtime recomputes the digest before restoring a snapshot."
+        }
+      ],
+      "expected_verdict": "supported"
+    },
+    {
+      "case_id": "contradicted-password-storage",
+      "task_id": "benchmark-contradicted-password-storage",
+      "prompt": "Describe the application's password storage.",
+      "draft": "The application stores user passwords in plaintext.",
+      "evidence": [
+        {
+          "id": "src-password-storage-01",
+          "text": "The application does not store user passwords. Authentication secrets must not be written into task content, checkpoint snapshots, or audit logs."
+        }
+      ],
+      "expected_verdict": "contradicted"
+    },
+    {
+      "case_id": "insufficient-encryption-evidence",
+      "task_id": "benchmark-insufficient-encryption-evidence",
+      "prompt": "Describe artifact encryption.",
+      "draft": "Every artifact is encrypted with AES-256 before being stored.",
+      "evidence": [
+        {
+          "id": "src-artifact-storage-01",
+          "text": "The artifact store writes versioned checkpoint snapshots to a local Git repository and records the snapshot SHA-256 digest for integrity verification. This source does not specify encryption at rest."
+        }
+      ],
+      "expected_verdict": "insufficient_evidence"
+    }
+  ]
+}

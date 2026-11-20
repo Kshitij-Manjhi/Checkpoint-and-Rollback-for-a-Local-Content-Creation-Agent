@@ -11,7 +11,7 @@ class OllamaUnavailableError(RuntimeError):
 
 
 class OllamaModelProvider:
-    def __init__(self, base_url: str | None = None, timeout: float = 30.0):
+    def __init__(self, base_url: str | None = None, timeout: float = 120.0):
         configured_url = base_url or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
         self.base_url = configured_url.rstrip("/")
         self.timeout = timeout
@@ -21,10 +21,19 @@ class OllamaModelProvider:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except (URLError, HTTPError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
             raise OllamaUnavailableError(
-                f"Could not query Ollama at {self.base_url}. Is Ollama running?"
+                f"Ollama model discovery at {self.base_url}/api/tags returned HTTP {exc.code} {exc.reason}"
+                + (f": {detail}" if detail else "")
             ) from exc
+        except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            raise OllamaUnavailableError(
+                f"Could not query Ollama at {self.base_url}/api/tags: {exc}. "
+                "Check that Ollama is running and OLLAMA_BASE_URL is correct."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise OllamaUnavailableError(f"Ollama returned an invalid model list from {self.base_url}/api/tags")
         models = payload.get("models", [])
         return sorted({
             str(item.get("name", "")).strip()
@@ -61,8 +70,21 @@ class OllamaModelProvider:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except (URLError, HTTPError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-            raise OllamaUnavailableError(f"Ollama generation failed for model '{model}'") from exc
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1500]
+            raise OllamaUnavailableError(
+                f"Ollama generation at {self.base_url}/api/generate returned HTTP {exc.code} {exc.reason} "
+                f"for model '{model}'" + (f": {detail}" if detail else "")
+            ) from exc
+        except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            raise OllamaUnavailableError(
+                f"Ollama generation at {self.base_url}/api/generate failed for model '{model}': {exc}. "
+                f"Timeout is {self.timeout:g}s; check Ollama status, model availability, and OLLAMA_BASE_URL."
+            ) from exc
+        if not isinstance(payload, dict):
+            raise OllamaUnavailableError(f"Ollama returned an invalid generation response for model '{model}'")
+        if payload.get("error"):
+            raise OllamaUnavailableError(f"Ollama could not generate with model '{model}': {payload['error']}")
         result = payload.get("response")
         if not isinstance(result, str) or not result.strip():
             raise OllamaUnavailableError("Ollama returned an empty response")

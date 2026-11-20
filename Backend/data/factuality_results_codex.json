@@ -1,0 +1,106 @@
+{
+  "status": "ok",
+  "dataset_id": "draftguard-factuality-mini-v1",
+  "dataset_path": "data\\factuality_benchmark.json",
+  "model": "qwen3:4b",
+  "ollama_url": "http://localhost:11434",
+  "timeout_seconds": 180.0,
+  "evaluator_version": "draftguard-factuality-0.1",
+  "case_count": 3,
+  "scored_case_count": 3,
+  "correct_case_count": 3,
+  "verdict_accuracy_on_scored_cases": 1.0,
+  "warning": "Tiny smoke-test benchmark only; not a general factuality performance estimate.",
+  "results": [
+    {
+      "case_id": "supported-checkpoint-hash",
+      "expected_verdict": "supported",
+      "observed_verdict": "supported",
+      "correct": true,
+      "evaluation": {
+        "status": "ok",
+        "model_name": "qwen3:4b",
+        "evaluator_version": "draftguard-factuality-0.1",
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "claim": "Checkpoint snapshots are protected with a SHA-256 digest.",
+            "verdict": "supported",
+            "evidence": [
+              {
+                "id": "src-checkpoint-hash-01",
+                "text": "Checkpoint snapshots are serialized as canonical JSON and protected with a SHA-256 digest. The runtime recomputes the digest before restoring a snapshot.",
+                "score": 0.6630843877792358
+              }
+            ],
+            "reason": "The evidence states that checkpoint snapshots are protected with a SHA-256 digest."
+          }
+        ],
+        "claim_count": 1,
+        "counts": {
+          "contradicted": 0,
+          "insufficient_evidence": 0,
+          "supported": 1
+        }
+      }
+    },
+    {
+      "case_id": "contradicted-password-storage",
+      "expected_verdict": "contradicted",
+      "observed_verdict": "contradicted",
+      "correct": true,
+      "evaluation": {
+        "status": "ok",
+        "model_name": "qwen3:4b",
+        "evaluator_version": "draftguard-factuality-0.1",
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "claim": "The application stores user passwords in plaintext.",
+            "verdict": "contradicted",
+            "evidence": [
+              {
+                "id": "src-password-storage-01",
+                "text": "The application does not store user passwords. Authentication secrets must not be written into task content, checkpoint snapshots, or audit logs.",
+                "score": 0.3428727388381958
+              }
+            ],
+            "reason": "The evidence explicitly states that the application does not store user passwords, directly contradicting the claim that it stores passwords in plaintext."
+          }
+        ],
+        "claim_count": 1,
+        "counts": {
+          "contradicted": 1,
+          "insufficient_evidence": 0,
+          "supported": 0
+        }
+      }
+    },
+    {
+      "case_id": "insufficient-encryption-evidence",
+      "expected_verdict": "insufficient_evidence",
+      "observed_verdict": "insufficient_evidence",
+      "correct": true,
+      "evaluation": {
+        "status": "ok",
+        "model_name": "qwen3:4b",
+        "evaluator_version": "draftguard-factuality-0.1",
+        "claims": [
+          {
+            "claim_id": "claim-1",
+            "claim": "Every artifact is encrypted with AES-256 before being stored.",
+            "verdict": "insufficient_evidence",
+            "evidence": [],
+            "reason": "No eligible evidence passages were retrieved."
+          }
+        ],
+        "claim_count": 1,
+        "counts": {
+          "contradicted": 0,
+          "insufficient_evidence": 1,
+          "supported": 0
+        }
+      }
+    }
+  ]
+}

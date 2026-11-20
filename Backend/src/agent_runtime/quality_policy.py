@@ -34,6 +34,7 @@ class EvaluationResult:
     evaluator_version: str = "draftguard-quality-1.0"
     evaluation_mode: str = "deterministic"
     semantic_evaluation: dict | None = None
+    factuality_evaluation: dict | None = None
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -155,4 +156,35 @@ class QualityPolicyEvaluator:
             reasons=tuple(dict.fromkeys(reasons)), checks=base.checks, scores=scores,
             quality_score_percent=percent, evaluator_version="draftguard-quality-1.0",
             evaluation_mode="hybrid", semantic_evaluation=semantic,
+        )
+
+
+    def combine_factuality(self, base: EvaluationResult, factuality: dict) -> EvaluationResult:
+        """Apply evidence-grounded factuality findings without allowing scores to override them."""
+        from dataclasses import replace
+
+        reasons = list(base.reasons)
+        status = factuality.get("status")
+        claims = factuality.get("claims", []) if isinstance(factuality, dict) else []
+        verdicts = [item.get("verdict") for item in claims if isinstance(item, dict)]
+        contradicted = verdicts.count("contradicted")
+        insufficient = verdicts.count("insufficient_evidence")
+        decision = base.decision
+        if status != "ok":
+            decision = Decision.NEEDS_HUMAN_REVIEW if decision != Decision.REJECT else decision
+            reasons.append("FACTUALITY_EVALUATION_UNAVAILABLE_OR_INVALID")
+        else:
+            if contradicted:
+                decision = Decision.REJECT
+                reasons.append("CONTRADICTED_FACTUAL_CLAIM")
+            elif insufficient and decision != Decision.REJECT:
+                decision = Decision.NEEDS_HUMAN_REVIEW
+                reasons.append("FACTUAL_CLAIMS_LACK_SUFFICIENT_EVIDENCE")
+        return replace(
+            base,
+            decision=decision,
+            reasons=tuple(dict.fromkeys(reasons)),
+            evaluator_version="draftguard-quality-1.1",
+            evaluation_mode="hybrid_evidence",
+            factuality_evaluation=factuality,
         )

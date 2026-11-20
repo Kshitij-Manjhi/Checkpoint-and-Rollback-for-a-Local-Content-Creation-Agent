@@ -43,6 +43,11 @@ class ReviewRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=2000)
 
 
+class EvidenceRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+    reference_id: str | None = Field(default=None, max_length=300)
+
+
 def create_app(database_path: str | Path | None = None, workflow: ContentWorkflow | None = None) -> FastAPI:
     """App factory makes storage/workflow injectable for tests and deployments."""
     if workflow is None:
@@ -64,7 +69,7 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
 
     app = FastAPI(
         title="Checkpoint and Rollback Agent API",
-        description="Local-first content generation, deterministic and optional local semantic evaluation, human-governed checkpointing, and recovery.",
+        description="Local-first content generation, optional evidence-grounded factuality checks, human-governed checkpointing, and recovery.",
         version="0.7.0",
     )
     # The frontend is a separate project folder and runs on its own local dev server.
@@ -122,6 +127,23 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
         store.create_task(task_id, task_id, created_at)
         task = store.get_task(task_id)
         return {"task_id": task["task_id"], "title": task["title"], "created": False}
+
+    @app.post("/api/tasks/{task_id}/evidence", status_code=201)
+    def add_evidence(task_id: str, request: EvidenceRequest) -> dict[str, Any]:
+        ensure_task(task_id)
+        if workflow.retrieval is None:
+            raise HTTPException(status_code=503, detail="Evidence retrieval is not configured")
+        evidence_id = request.reference_id or f"evidence:{uuid.uuid4()}"
+        try:
+            saved_id = workflow.retrieval.add(
+                request.text.strip(), task_id=task_id, kind="evidence",
+                reference_id=evidence_id,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not index evidence: {type(exc).__name__}") from exc
+        if not saved_id:
+            raise HTTPException(status_code=422, detail="Evidence text must not be blank")
+        return {"task_id": task_id, "evidence_id": saved_id, "kind": "evidence", "indexed": True}
 
     @app.post("/api/tasks/{task_id}/generate")
     def generate(task_id: str, request: GenerateRequest) -> dict[str, Any]:

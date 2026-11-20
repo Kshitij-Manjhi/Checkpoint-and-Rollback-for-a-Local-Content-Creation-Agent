@@ -118,3 +118,56 @@ used as part of this validation.
 ## Required architecture stack
 
 Production-stack mode uses MySQL metadata, a dedicated Git artifact repository, persistent Chroma evidence retrieval, Python orchestration, and local Ollama/Qwen. The deployment path requires explicit MySQL configuration and does not silently downgrade to SQLite. See `Backend/README.md` for setup and the explicit SQLite-only test mode.
+
+
+## Evidence-grounded factuality evaluation (FASTFACT-inspired prototype)
+
+DraftGuard now includes an opt-in, lightweight adaptation of the FASTFACT claim-and-verify pattern. It is **not a reproduction of FASTFACT** and it does not treat a Qwen self-score as factual proof.
+
+Set these variables before starting the backend:
+
+```powershell
+$env:AGENT_FACTUALITY_EVALUATION = "1"
+# Optional; otherwise uses the selected generation model, then AGENT_QUALITY_MODEL
+$env:AGENT_FACTUALITY_MODEL = "qwen3:4b"
+```
+
+The workflow asks the model to extract atomic factual claims, retrieves only indexed records marked `evidence`, `source`, `reference`, or `document`, then asks the model to verify each claim against the retrieved passages. The returned result records each claim, verdict, evidence IDs/text, and reason. Supported/contradicted verdicts are downgraded to `insufficient_evidence` if the verifier cites no valid retrieved passage. A contradicted claim rejects the draft; insufficient evidence or an evaluator error routes it to human review. Existing human approval remains required for safe checkpoints.
+
+### Run the fixed smoke-test benchmark
+
+The small, versioned starter dataset is `Backend/data/factuality_benchmark.json`. It has three manually authored cases (supported, contradicted, and insufficient evidence); it is a wiring/demo benchmark, not enough data to support a general accuracy claim.
+
+From `Backend`, after installing project dependencies and starting Ollama:
+
+```powershell
+python run_factuality_benchmark.py --model qwen3:4b --timeout 180
+```
+
+The runner first checks the configured Ollama server (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and confirms the requested model is installed. The timeout applies to both discovery and generation. It then indexes case evidence into a persistent local Chroma directory and writes trial details to `data/factuality_results.json`. It reports accuracy only over cases for which evaluation returns exactly one claim, marks the report incomplete, and exits nonzero if any case is unscored. Provider failures retain the underlying connection, HTTP, timeout, or Ollama error details; failed evaluations contain no claim verdicts and are never scored. Re-running reuses the persistent evidence index. For a clean repeat, remove `runtime_data/factuality_benchmark_index` before running again.
+
+### Add evidence before generating
+
+Create a task in the UI/API, then index source passages for that same task. Example using PowerShell (replace the task ID and text with your benchmark case):
+
+```powershell
+$body = @{
+  text = "Checkpoint snapshots are serialized to canonical JSON and protected with a SHA-256 digest."
+  reference_id = "benchmark-source-checkpoint-integrity-01"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/tasks/YOUR_TASK_ID/evidence" `
+  -ContentType "application/json" -Body $body
+```
+
+Repeat for each source passage. Then generate through `POST /api/tasks/YOUR_TASK_ID/generate` using `{"prompt":"...","mode":"ollama","model_name":"qwen3:4b"}`. Inspect `state.factuality_evaluation` in the response/checkpoint and `CONTENT_EVALUATED` audit event. Evidence is task-scoped; an evidence passage added to one task is not automatically available to another.
+
+### Limitations and reproducibility
+
+- The evaluator is opt-in (`AGENT_FACTUALITY_EVALUATION=0` by default) so existing workflow behaviour remains unchanged unless explicitly enabled.
+- Claim extraction and verdict generation still use an LLM; evidence IDs are validated in Python, but the semantic correctness of the verdict is not guaranteed. Evaluate against manually labelled examples.
+- The existing Chroma index uses deterministic feature-hashing vectors, not a trained semantic embedding model. Retrieval may miss paraphrases or retrieve merely related passages. Check retrieval results in every benchmark case.
+- If no eligible evidence is retrieved, the claim is marked `insufficient_evidence`; absence of evidence is not treated as proof that a claim is false.
+- The benchmark must be fixed and versioned. Record the model name, prompt, evidence corpus/version, and run results. Do not present the current synthetic recovery experiment as a factuality benchmark.
+- This implementation has unit tests with fake model responses; it does not establish real-model accuracy until tested with a labelled corpus and the actual local Ollama model.

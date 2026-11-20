@@ -8,6 +8,7 @@ from .content_generator import create_generator
 from .model_provider import OllamaModelProvider
 from .quality_policy import QualityPolicyEvaluator
 from .semantic_evaluator import SemanticQualityEvaluator
+from .factuality_evaluator import EvidenceFactualityEvaluator
 
 
 class ContentWorkflow:
@@ -98,10 +99,28 @@ class ContentWorkflow:
                     datetime.now(timezone.utc).isoformat(),
                 )
                 raise
+        factuality_evaluation = None
+        factuality_enabled = os.environ.get("AGENT_FACTUALITY_EVALUATION", "0").strip().lower() in {"1", "true", "yes", "on"}
+        if factuality_enabled:
+            factuality_model = os.environ.get("AGENT_FACTUALITY_MODEL") or generated.model_name or os.environ.get("AGENT_QUALITY_MODEL")
+            if factuality_model and self.retrieval is not None:
+                factuality_evaluation = EvidenceFactualityEvaluator(
+                    self.provider, factuality_model, self.retrieval
+                ).evaluate(prompt, generated.text, task_id=task_id)
+            else:
+                factuality_evaluation = {
+                    "status": "error", "model_name": factuality_model,
+                    "evaluator_version": "draftguard-factuality-0.1", "claims": [],
+                    "claim_count": 0, "counts": {},
+                    "reasons": ["Factuality evaluation requires a configured model and evidence retrieval index."],
+                }
+            evaluation = self.evaluator.combine_factuality(evaluation, factuality_evaluation)
+
         state = {
             "task_id": task_id, "prompt": prompt, "draft": generated.text,
             "version": version, "mode": generated.mode, "model_name": generated.model_name,
             "decision": evaluation.decision.value, "evaluation": evaluation.to_dict(),
+            "factuality_evaluation": factuality_evaluation,
             "retrieved_evidence": [{"id": item["id"], "kind": item["kind"], "score": item["score"], "text": item["text"][:2000]} for item in retrieved],
         }
         # Step 5 governance rule: automated checks never grant rollback safety.
@@ -168,6 +187,11 @@ class ContentWorkflow:
                 "semantic_status": semantic_evaluation.get("status") if semantic_evaluation else "not_run",
                 "semantic_model_name": semantic_evaluation.get("model_name") if semantic_evaluation else None,
                 "semantic_evaluator_version": semantic_evaluation.get("evaluator_version") if semantic_evaluation else None,
+                "factuality_status": factuality_evaluation.get("status") if factuality_evaluation else "not_run",
+                "factuality_evaluator_version": factuality_evaluation.get("evaluator_version") if factuality_evaluation else None,
+                "factuality_claim_count": factuality_evaluation.get("claim_count") if factuality_evaluation else None,
+                "factuality_counts": factuality_evaluation.get("counts") if factuality_evaluation else None,
+                "factuality_findings": factuality_evaluation.get("claims", []) if factuality_evaluation else [],
                 "findings": list(evaluation.reasons), "checks": evaluation.checks,
                 "policy_decision": state["decision"],
                 "approval_status": state["approval_status"],

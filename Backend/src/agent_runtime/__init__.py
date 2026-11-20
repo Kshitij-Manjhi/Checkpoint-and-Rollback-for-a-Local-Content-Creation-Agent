@@ -5,11 +5,12 @@ from .content_generator import GeneratedContent, NoLLMContentGenerator, OllamaCo
 from .model_provider import OllamaModelProvider, OllamaUnavailableError
 from .quality_policy import Decision, EvaluationResult, QualityPolicyEvaluator
 from .workflow import ContentWorkflow
+from .factuality_evaluator import EvidenceFactualityEvaluator
 
 __all__ = [
     "Checkpoint", "CheckpointManager", "CheckpointNotFoundError", "RestoreResult",
     "SnapshotIntegrityError", "GeneratedContent", "NoLLMContentGenerator",
     "OllamaContentGenerator", "create_generator", "OllamaModelProvider",
     "OllamaUnavailableError", "Decision", "EvaluationResult",
-    "QualityPolicyEvaluator", "ContentWorkflow",
+    "QualityPolicyEvaluator", "ContentWorkflow", "EvidenceFactualityEvaluator",
 ]
