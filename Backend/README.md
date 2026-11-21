@@ -125,7 +125,23 @@ python run_evaluation.py --repetitions 10 --output data/evaluation.sqlite3
 ```
 
 The command writes a detailed JSON report next to the SQLite database. Generated
-`data/` output is ignored by Git.
+`data/` output is ignored by Git. The terminal summary includes the requested recovery
+checks: recoverable failures restored (successes / eligible attempts), mean rollback
+latency, false rollback rate (false triggers / healthy controls), corrupt-checkpoint
+fallback (successful fallbacks / corruption trials), and missing-checkpoint detection
+(expected fail-closed outcomes / missing-checkpoint trials). It also prints per-scenario
+counts and calls out unexpected or unmeasured trials. Use `--repetitions 5` for 50 trials
+because the current harness has 10 scenarios.
+
+Example:
+
+```bash
+python run_evaluation.py --repetitions 5 --output runtime_data/step10-50-trial-report.sqlite3
+```
+
+A `completed_with_failures` status is intentional when injected faults are not handled as
+expected; inspect the scenario breakdown rather than treating the run as passed. The
+unsupported-claim scenario is marked unmeasured unless a factuality provider is configured.
 
 ### Metrics and operational definitions
 
