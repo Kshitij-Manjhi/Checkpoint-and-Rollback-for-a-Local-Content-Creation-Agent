@@ -107,3 +107,17 @@ state. Conversation history is deliberately not captured. Common credential
 patterns are redacted from snapshot strings; this is not a general-purpose secret
 scanner. The checkpoint table displays Git commit, SHA-256, timestamp, review,
 integrity, and recovery eligibility returned by the backend.
+
+### Current version indicator and lost-work metric
+The Versions & recovery view now displays the checkpoint currently loaded in the editor, including its version number, checkpoint ID, approval state, Git commit prefix, and integrity status when available. Generating a draft, inspecting a checkpoint, or recovering a safe checkpoint updates this indicator. The Recovery Experiment lost-work metric uses word-token sequence alignment: inserted/replaced word tokens in the post-checkpoint candidate are counted as lost if those exact token positions are not retained in the restored artifact. This is a reproducible lexical proxy, not a semantic estimate of the value of work; the report exposes the unit and denominator.
+
+### Opening an evaluation report
+
+In **Audit & evaluation**, run a Recovery experiment or select a saved recovery run in **Historical run**, then choose **Open evaluation report**. The report opens in a readable standalone tab with run metadata, recorded metrics, trial outcomes, and a Print / Save as PDF action. If the browser blocks the new tab, allow pop-ups for the local DraftGuard page and retry. The report uses persisted backend data; missing metrics are shown as not measured.
+
+Advanced prototype controls (Recovery Metrics, Recovery Experiment, automated tests, and factuality benchmark) are grouped under the collapsed **Developer tools** disclosure on the Audit & evaluation page. They remain available when expanded and are not shown by default in the normal demo view.
+
+
+### Selecting a recovery version
+
+The Versions & recovery view can restore a specific historical version. Use **Choose version to recover** and enter a version number shown in the safe-version list, or use the **Recover** action on an eligible table row. Only checkpoints marked safe with verified snapshot integrity are offered; the backend revalidates eligibility and the recorded Git artifact before writing the selected state. The latest-safe recovery API remains available separately.

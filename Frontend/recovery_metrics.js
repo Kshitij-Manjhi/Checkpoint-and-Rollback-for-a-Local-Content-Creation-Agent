@@ -24,7 +24,7 @@
       ['False rollback triggers',pct(falseRate.value),
         `${falseRate.numerator??'—'} / ${falseRate.denominator??'—'} healthy controls`,falseRate.definition],
       ['Post-recovery quality',quality.value==null?'Unavailable':`${fixed(quality.value,1)} / 100`,
-        `baseline ${quality.baseline_mean==null?'—':`${fixed(quality.baseline_mean,1)} / 100`} · Δ ${quality.delta_from_baseline==null?'—':fixed(quality.delta_from_baseline,1)}`,
+        `policy pass ${quality.accepted_count??'—'} / ${quality.denominator??'—'} · rate ${quality.accepted_rate==null?'Unavailable':pct(quality.accepted_rate)} · baseline ${quality.baseline_mean==null?'—':`${fixed(quality.baseline_mean,1)} / 100`} · Δ ${quality.delta_from_baseline==null?'—':fixed(quality.delta_from_baseline,1)}`,
         quality.definition],
     ];
     return `<div class="recovery-metric-grid">${cards.map(([title,value,detail,definition])=>

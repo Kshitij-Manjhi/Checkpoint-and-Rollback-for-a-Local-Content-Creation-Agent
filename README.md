@@ -51,7 +51,7 @@ $env:AGENT_QUALITY_MODEL = "qwen3:4b"
 - `quality_score` remains normalized from 0–1 for compatibility; `quality_score_percent` is 0–100.
 - Blocking policy markers cannot be overridden by a high semantic score.
 - A high score does not mark a checkpoint safe. Human approval is still required.
-- Rollback continues to restore the latest integrity-verified safe checkpoint.
+- Recovery supports both latest-safe rollback and explicit selection of a historical safe version. Selected restores require the checkpoint to belong to the task, remain marked safe, and pass snapshot plus recorded Git-artifact integrity checks.
 - Factual support is not independently verified unless evidence is supplied and checked. These scores are prototype indicators, not safety guarantees.
 
 ## Test
@@ -71,7 +71,7 @@ The current dashboard also provides a fixed automated-test runner, a separate lo
 - Task IDs, titles, and creation timestamps are now stored in SQLite rather than only in API process memory.
 - Task metadata and checkpoints remain available when a new API app instance starts against the same database file.
 - Existing databases are migrated non-destructively by creating the `tasks` table if it is absent. Older checkpoint-only tasks are reconstructed with their task ID as a fallback title when accessed.
-- Rollback checks safe checkpoints newest-first and verifies each snapshot's SHA-256 digest and JSON-object shape before restoring it.
+- Latest-safe rollback checks safe checkpoints newest-first and verifies each snapshot's SHA-256 digest and JSON-object shape before restoring it. The Versions & recovery page also supports restoring a specifically selected safe version.
 - If the newest safe checkpoint is corrupt or has an empty/missing snapshot payload, the runtime records `ROLLBACK_CANDIDATE_REJECTED` and tries an older safe checkpoint. If no verified safe checkpoint remains, rollback fails closed with an explicit error.
 - The original `is_safe` flag is not changed merely because a snapshot is corrupt; the corrupted record remains visible for investigation, but is ineligible for restoration.
 
@@ -81,7 +81,7 @@ From `Backend`, run `python -m pytest -q`. The Step 9 suite adds tests for task 
 
 ## Step 10 — Experimental evaluation
 
-The evaluation runner now compares a no-checkpoint baseline with DraftGuard's checkpointed recovery under deterministic synthetic workloads. It reports recovery success, rollback latency, false rollback rate, a character-based lost-work proxy, post-recovery synthetic quality, missing-checkpoint detection, and fallback from a corrupted newest safe checkpoint.
+The evaluation runner now compares a no-checkpoint baseline with DraftGuard's checkpointed recovery under deterministic synthetic workloads. It reports recovery success, rollback latency, false rollback rate, a word-token-alignment lost-work proxy, post-recovery synthetic quality, missing-checkpoint detection, and fallback from a corrupted newest safe checkpoint.
 
 Run from `Backend/`:
 
@@ -183,3 +183,13 @@ Repeat for each source passage. Then generate through `POST /api/tasks/YOUR_TASK
 - If no eligible evidence is retrieved, the claim is marked `insufficient_evidence`; absence of evidence is not treated as proof that a claim is false.
 - The benchmark must be fixed and versioned. Record the model name, prompt, evidence corpus/version, and run results. Do not present the current synthetic recovery experiment as a factuality benchmark.
 - This implementation has unit tests with fake model responses; it does not establish real-model accuracy until tested with a labelled corpus and the actual local Ollama model.
+
+
+## Selective version recovery
+
+On **Versions & recovery**, use **Choose version to recover** to enter a version number from the list of integrity-verified safe checkpoints, or use **Recover** beside a specific eligible version. DraftGuard restores that exact checkpoint rather than silently substituting the newest one. The restore is rejected if the checkpoint is pending/rejected, belongs to another task, has a damaged snapshot, or its recorded Git artifact fails verification. Later versions remain in history; the editor loads the selected version. The task-level rollback API remains available for the simpler “latest safe version” behavior.
+
+
+## Explicit approved-draft baseline
+
+The writing studio lets you choose an exact approved checkpoint as the LLM baseline for the next generation. Select it in the generation baseline dropdown or click **Use as next baseline** in Versions & recovery. The backend validates task ownership, human approval, safe status, and integrity; the selected checkpoint ID is recorded in provenance. See `APPROVED_DRAFT_MEMORY.md`.

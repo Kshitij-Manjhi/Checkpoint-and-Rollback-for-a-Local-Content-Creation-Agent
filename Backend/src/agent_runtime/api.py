@@ -31,6 +31,8 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=20000)
     mode: Literal["no_llm", "ollama"] = "no_llm"
     model_name: str | None = None
+    continue_from_previous: bool = True
+    baseline_checkpoint_id: str | None = Field(default=None, max_length=80)
 
 
 class TaskCreateRequest(BaseModel):
@@ -253,7 +255,9 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
     def generate(task_id: str, request: GenerateRequest) -> dict[str, Any]:
         ensure_task(task_id)
         try:
-            return workflow.generate(task_id, request.prompt, mode=request.mode, model_name=request.model_name)
+            return workflow.generate(task_id, request.prompt, mode=request.mode, model_name=request.model_name,
+                                     continue_from_previous=request.continue_from_previous,
+                                     baseline_checkpoint_id=request.baseline_checkpoint_id)
         except OllamaUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
@@ -333,11 +337,6 @@ def create_app(database_path: str | Path | None = None, workflow: ContentWorkflo
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except SnapshotIntegrityError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if restored["checkpoint_id"] != checkpoint_id:
-            # The public rollback action restores latest verified safe checkpoint.
-            # If user asked for an older safe checkpoint, the endpoint explicitly
-            # tells the client which checkpoint was actually selected.
-            restored["requested_checkpoint_id"] = checkpoint_id
         return restored
 
     @app.post("/api/tasks/{task_id}/rollback")

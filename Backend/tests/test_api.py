@@ -115,6 +115,37 @@ def test_policy_rejection_and_rollback(tmp_path):
     assert restored["verification_passed"] is True
 
 
+
+def test_checkpoint_rollback_endpoint_restores_selected_version(tmp_path):
+    client = client_for(tmp_path)
+    client.post("/api/tasks", json={"task_id": "select-version", "title": "Select version"})
+    first = client.post("/api/tasks/select-version/generate", json={
+        "prompt": "first safe version", "mode": "no_llm"
+    }).json()
+    approved = client.post(f"/api/checkpoints/{first['checkpoint_id']}/review", json={
+        "decision": "approve", "reviewer": "reviewer", "reason": "First version approved."
+    })
+    assert approved.status_code == 200
+    second = client.post("/api/tasks/select-version/generate", json={
+        "prompt": "second candidate version", "mode": "no_llm"
+    }).json()
+    assert second["checkpoint_id"] != first["checkpoint_id"]
+    restored = client.post(f"/api/checkpoints/{first['checkpoint_id']}/rollback")
+    assert restored.status_code == 200
+    assert restored.json()["checkpoint_id"] == first["checkpoint_id"]
+    assert restored.json()["verification_passed"] is True
+
+
+def test_checkpoint_rollback_endpoint_rejects_pending_version(tmp_path):
+    client = client_for(tmp_path)
+    client.post("/api/tasks", json={"task_id": "no-pending-restore", "title": "No pending restore"})
+    pending = client.post("/api/tasks/no-pending-restore/generate", json={
+        "prompt": "pending candidate", "mode": "no_llm"
+    }).json()
+    response = client.post(f"/api/checkpoints/{pending['checkpoint_id']}/rollback")
+    assert response.status_code == 404
+
+
 def test_missing_task_and_invalid_evaluation_repetitions(tmp_path):
     client = client_for(tmp_path)
     assert client.get("/api/tasks/missing").status_code == 404

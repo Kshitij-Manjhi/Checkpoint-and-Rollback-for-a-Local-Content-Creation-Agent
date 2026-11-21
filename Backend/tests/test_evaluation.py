@@ -1,6 +1,6 @@
 import json
 import pytest
-from agent_runtime.evaluation import run_experiment
+from agent_runtime.evaluation import run_experiment, _lost_work
 from agent_runtime.failure_simulator import SCENARIOS, assess_candidate
 from agent_runtime.store import SQLiteCheckpointStore
 
@@ -48,14 +48,33 @@ def test_false_trigger_denominator_uses_healthy_controls(tmp_path):
     assert metric["denominator"] == len(healthy) == 2
     assert metric["numerator"] == sum(trial["false_rollback"] for trial in healthy)
     assert all(trial["rollback_triggered"] is False for trial in healthy)
+    assert metric["value"] == 0.0
+
+
+def test_lost_work_counts_introduced_tokens_retained_after_reordering():
+    # An introduced token still exists after recovery even if it moved position.
+    result = _lost_work("baseline text", "baseline alpha text", "alpha baseline text", True)
+    assert result["unit"] == "word_token"
+    assert result["created_units"] == 1
+    assert result["lost_units"] == 0
+    assert result["retained_units"] == 1
+    assert result["percentage"] == 0.0
+
+
+def test_lost_work_uses_frequency_above_baseline_for_repeated_words():
+    result = _lost_work("baseline alpha", "baseline alpha alpha", "baseline alpha", True)
+    assert result["created_units"] == 1
+    assert result["lost_units"] == 1
+    assert result["percentage"] == 100.0
 
 
 def test_lost_work_is_word_based_and_zero_denominator_is_unavailable(tmp_path):
     report = run_experiment(tmp_path / "lost-work.sqlite3", repetitions=1)
     quality = next(row for row in report["trials"] if row["scenario"] == "quality_degradation")
-    assert quality["lost_work"]["unit"] == "word"
+    assert quality["lost_work"]["unit"] == "word_token"
     assert quality["lost_work_percentage"] is not None
     assert quality["lost_work"]["lost_units"] <= quality["lost_work"]["created_units"]
+    assert report["metrics"]["post_recovery_quality"]["accepted_count"] == report["metrics"]["post_recovery_quality"]["denominator"]
 
 
 def test_corrupt_git_artifact_falls_back_to_exact_older_state(tmp_path):
@@ -84,3 +103,59 @@ def test_unconfigured_factuality_scenario_is_unmeasured(tmp_path):
     trial = next(row for row in report["trials"] if row["scenario"] == "unsupported_claim")
     assert trial["outcome"] == "unmeasured"
     assert trial["actual_behavior"]["factuality"]["status"] == "not_run"
+
+
+def test_quality_degradation_is_flagged_in_trial_report(tmp_path):
+    report = run_experiment(tmp_path / "quality-gate.sqlite3", repetitions=1)
+    trial = next(row for row in report["trials"] if row["scenario"] == "quality_degradation")
+    assert trial["candidate_evaluation"]["decision"] in {"reject", "needs_human_review"}
+    assert "QUALITY_BELOW_MIN_LENGTH" in trial["detection_reasons"]
+
+
+def test_policy_violation_is_rejected_by_quality_gate(tmp_path):
+    report = run_experiment(tmp_path / "policy-gate.sqlite3", repetitions=1)
+    trial = next(row for row in report["trials"] if row["scenario"] == "policy_violation")
+    assert trial["candidate_evaluation"]["decision"] == "reject"
+    assert any(reason.startswith("POLICY_MARKER_DETECTED") for reason in trial["detection_reasons"])
+
+
+def test_lost_work_metric_excludes_healthy_controls_from_denominator(tmp_path):
+    report = run_experiment(tmp_path / "lost-work-denominator.sqlite3", repetitions=1)
+    trials = report["trials"]
+    metric = report["metrics"]["lost_work_percentage"]
+    eligible = [t for t in trials if t["rollback_triggered"] and t["lost_work_percentage"] is not None]
+    assert metric["denominator"] == sum(t["lost_work"]["created_units"] for t in eligible)
+    assert metric["numerator"] == sum(t["lost_work"]["lost_units"] or 0 for t in eligible)
+
+
+def test_unsupported_claim_trial_uses_scoped_evidence_and_cited_verdict(tmp_path):
+    import json
+
+    class Provider:
+        def generate(self, model, prompt, *, system=None):
+            payload = json.loads(prompt)
+            if payload.get("task", "").startswith("Extract distinct"):
+                return json.dumps({"claims": [{"claim": "DraftGuard stores every user password in a public database."}]})
+            evidence = payload["evidence"]
+            return json.dumps({"verdict": "contradicted", "evidence_ids": [evidence[0]["id"]],
+                               "reason": "The supplied evidence does not establish public password storage."})
+
+    class Retrieval:
+        def __init__(self):
+            self.items = {}
+        def add(self, text, *, task_id, kind, reference_id=None):
+            self.items[(task_id, reference_id)] = {"id": reference_id, "text": text, "kind": kind, "score": 1.0}
+            return reference_id
+        def query(self, text, *, task_id, limit=3):
+            return [item for (scope, _), item in self.items.items() if scope == task_id][:limit]
+
+    report = run_experiment(tmp_path / "factuality-integration.sqlite3", repetitions=1,
+                            provider=Provider(), retrieval=Retrieval(), factuality_enabled=True,
+                            factuality_model="fake-model")
+    trial = next(row for row in report["trials"] if row["scenario"] == "unsupported_claim")
+    factuality = trial["actual_behavior"]["factuality"]
+    assert factuality["status"] == "ok"
+    assert factuality["claims"][0]["verdict"] == "contradicted"
+    assert factuality["claims"][0]["cited_source_ids"]
+    assert trial["candidate_evaluation"]["decision"] == "reject"
+    assert trial["rollback_triggered"] is True

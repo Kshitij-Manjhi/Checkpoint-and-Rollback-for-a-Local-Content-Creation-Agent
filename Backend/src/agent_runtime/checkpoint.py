@@ -181,6 +181,66 @@ class CheckpointManager:
                 return row
         return None
 
+    def restore_checkpoint(self, task_id: str, checkpoint_id: str) -> RestoreResult:
+        """Restore one explicitly selected safe checkpoint after integrity checks."""
+        started = time.perf_counter()
+        row = next((item for item in self.store.list_safe_checkpoints(task_id)
+                    if item["checkpoint_id"] == checkpoint_id), None)
+        if row is None:
+            record = self.store.get_checkpoint(checkpoint_id)
+            if record is None:
+                raise CheckpointNotFoundError(f"Checkpoint '{checkpoint_id}' does not exist")
+            if record.get("task_id") != task_id:
+                raise CheckpointNotFoundError("Selected checkpoint does not belong to this task")
+            raise CheckpointNotFoundError("Selected checkpoint is not marked safe and cannot be restored")
+
+        state = self._verified_state(row)
+        if state is None:
+            self.store.add_audit_event(
+                task_id, "ROLLBACK_FAILED", checkpoint_id,
+                {"target_checkpoint_id": checkpoint_id, "verification_passed": False,
+                 "failure": "snapshot_integrity_failed", "outcome": "no_restore"},
+                datetime.now(timezone.utc).isoformat(),
+            )
+            raise SnapshotIntegrityError("Selected checkpoint failed snapshot integrity verification")
+
+        restoration = None
+        if self.artifact_store is not None:
+            artifact = self.artifact_store.get(checkpoint_id, _row_value(row, "artifact_commit_hash"))
+            if not artifact or artifact.get("sha256") != row["snapshot_sha256"] or artifact.get("state") != state:
+                self.store.add_audit_event(
+                    task_id, "ROLLBACK_FAILED", checkpoint_id,
+                    {"target_checkpoint_id": checkpoint_id, "verification_passed": False,
+                     "failure": "git_artifact_integrity_failed", "outcome": "no_restore"},
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                raise SnapshotIntegrityError("Selected checkpoint's Git artifact is missing or failed integrity verification")
+            try:
+                restoration = self.artifact_store.restore(
+                    checkpoint_id, _row_value(row, "artifact_commit_hash"), task_id,
+                    row["snapshot_sha256"],
+                )
+            except Exception as exc:
+                self.store.add_audit_event(
+                    task_id, "ROLLBACK_FAILED", checkpoint_id,
+                    {"target_checkpoint_id": checkpoint_id, "verification_passed": False,
+                     "failure_type": type(exc).__name__, "failure": str(exc)[:1000],
+                     "outcome": "no_restore"}, datetime.now(timezone.utc).isoformat(),
+                )
+                raise SnapshotIntegrityError("Selected checkpoint could not be restored from its verified Git artifact") from exc
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        checkpoint = _to_checkpoint(row)
+        self.store.add_audit_event(
+            task_id=task_id, event_type="ROLLBACK_VERIFIED", checkpoint_id=checkpoint_id,
+            details={"verification_passed": True, "rollback_latency_ms": round(elapsed_ms, 3),
+                     "selected_checkpoint": True, "artifact_commit_hash": _row_value(row, "artifact_commit_hash"),
+                     "restored_artifact": restoration},
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return RestoreResult(checkpoint=checkpoint, state=state, verification_passed=True,
+                             rollback_latency_ms=elapsed_ms)
+
     def restore_latest_safe(self, task_id: str) -> RestoreResult:
         started = time.perf_counter()
         candidates = self.store.list_safe_checkpoints(task_id)

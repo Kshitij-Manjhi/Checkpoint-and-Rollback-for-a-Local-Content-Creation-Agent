@@ -120,6 +120,33 @@ def test_rollback_skips_missing_git_reference_and_fails_closed_if_none_valid(tmp
         manager.restore_latest_safe('refs')
 
 
+
+def test_git_checkpoint_can_restore_an_explicitly_selected_older_safe_version(tmp_path):
+    if shutil.which('git') is None:
+        pytest.skip('Git executable is not installed')
+    from agent_runtime import CheckpointManager
+    from agent_runtime.store import SQLiteCheckpointStore
+
+    metadata = SQLiteCheckpointStore(tmp_path / 'selected-metadata.sqlite3')
+    artifacts = GitArtifactStore(tmp_path / 'selected-artifacts')
+    manager = CheckpointManager(metadata, artifact_store=artifacts)
+    first = manager.create_checkpoint('selected-task', {
+        'task_id': 'selected-task', 'draft': 'The earlier approved draft.',
+        'version': 1, 'approval_status': 'approved',
+    }, is_safe=True)
+    second = manager.create_checkpoint('selected-task', {
+        'task_id': 'selected-task', 'draft': 'The newer approved draft.',
+        'version': 2, 'approval_status': 'approved',
+    }, is_safe=True, parent_checkpoint_id=first.checkpoint_id)
+
+    restored = manager.restore_checkpoint('selected-task', first.checkpoint_id)
+    working_file = Path(artifacts.repository_path) / 'working' / (hashlib.sha256(b'selected-task').hexdigest() + '.json')
+    assert restored.checkpoint.checkpoint_id == first.checkpoint_id
+    assert restored.state['draft'] == 'The earlier approved draft.'
+    assert json.loads(working_file.read_text(encoding='utf-8'))['draft'] == 'The earlier approved draft.'
+    assert second.checkpoint_id != restored.checkpoint.checkpoint_id
+
+
 def test_git_artifact_with_corrupt_payload_is_not_readable(tmp_path):
     if shutil.which('git') is None:
         pytest.skip('Git executable is not installed')

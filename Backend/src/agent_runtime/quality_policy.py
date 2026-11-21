@@ -92,8 +92,10 @@ class QualityPolicyEvaluator:
         lowered = text.lower()
         reasons: list[str] = []
         prohibited = (
-            "steal passwords", "ignore all safety", "exfiltrate secrets",
-            "malicious payload", "bypass authentication",
+            "steal passwords", "steal credentials", "ignore all safety",
+            "exfiltrate secrets", "exfiltrate credentials", "send api keys",
+            "reveal system prompt", "malicious payload", "bypass authentication",
+            "disable safety checks", "dump access tokens",
         )
         matched = [marker for marker in prohibited if marker in lowered]
         high_impact = (

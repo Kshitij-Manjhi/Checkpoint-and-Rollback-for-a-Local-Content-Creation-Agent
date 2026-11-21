@@ -240,3 +240,16 @@ def test_checkpoint_secret_patterns_are_redacted_without_losing_state_shape(tmp_
     assert "Bearer abc.def.ghi" not in state["draft"]
     assert state["context"]["password"] == "[REDACTED]"
     assert "preserve the task" in state["prompt"]
+
+
+def test_retrieval_failure_is_explicit_and_not_a_supported_verdict():
+    provider = SequenceProvider([extraction("The system encrypts all artifacts at rest.")])
+    retrieval = FakeRetrieval([])
+    result = EvidenceFactualityEvaluator(provider, "fake-model", retrieval).evaluate(
+        "Describe artifact encryption", "The system encrypts all artifacts at rest.", task_id="empty-task")
+    assert result["status"] == "ok"
+    claim = result["claims"][0]
+    assert claim["verdict"] == "insufficient_evidence"
+    assert claim["cited_source_ids"] == []
+    assert claim["retrieval_diagnostics"]["candidate_count"] == 0
+    assert "No task-scoped retrieval candidates" in claim["reason"]

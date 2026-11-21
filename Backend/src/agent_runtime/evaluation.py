@@ -5,9 +5,9 @@ import difflib
 import json
 import re
 import statistics
+from collections import Counter
 import time
 import uuid
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,7 +20,8 @@ from .quality_policy import QualityPolicyEvaluator
 from .store import SQLiteCheckpointStore
 
 SCENARIOS = tuple(FAILURE_SCENARIOS)
-BASELINE_DRAFT = "This is a sufficiently detailed safe baseline draft for recovery."
+BASELINE_DRAFT = ("DraftGuard keeps approved content in versioned checkpoints and records metadata for audit. "
+                  "A recovery must validate the checkpoint integrity and restore the exact approved state.")
 _WORD = re.compile(r"\b[\w'-]+\b", re.UNICODE)
 
 
@@ -45,20 +46,42 @@ def _word_delta(before: str, after: str) -> list[str]:
 
 
 def _lost_work(before: str, candidate: str, restored: str | None, rollback_triggered: bool) -> dict[str, Any]:
-    introduced = _word_delta(before, candidate)
-    denominator = len(introduced)
+    """Estimate loss of post-checkpoint word-token additions using multiset accounting.
+
+    Added/replaced tokens are identified by sequence diff against the baseline. A token
+    is counted as retained only when it occurs in the restored artifact in excess of the
+    baseline's token count. This handles moved tokens and repeated words better than
+    position-only matching. It remains a lexical proxy, not a semantic measure of work.
+    """
+    baseline_tokens = _WORD.findall(before)
+    candidate_tokens = _WORD.findall(candidate)
+    introduced_positions: set[int] = set()
+    for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(
+        a=baseline_tokens, b=candidate_tokens, autojunk=False
+    ).get_opcodes():
+        if tag in {"insert", "replace"}:
+            introduced_positions.update(range(j1, j2))
+    introduced = Counter(candidate_tokens[index].casefold() for index in introduced_positions)
+    denominator = sum(introduced.values())
+    base = {"unit": "word_token", "work_unit": "word_token",
+            "definition": "Word tokens inserted/replaced after the baseline; lost tokens are introduced token occurrences not present above baseline frequency in the restored artifact. This is a lexical proxy, not a semantic measure."}
     if denominator == 0:
-        return {"percentage": None, "lost_units": None, "created_units": 0,
-                "unit": "word", "reason": "No measurable post-checkpoint words were created."}
+        return {**base, "percentage": None, "lost_units": None, "created_units": 0,
+                "reason": "No measurable post-checkpoint word tokens were created."}
     if not rollback_triggered:
-        return {"percentage": 0.0, "lost_units": 0, "created_units": denominator, "unit": "word"}
+        return {**base, "percentage": 0.0, "lost_units": 0, "created_units": denominator,
+                "retained_units": denominator}
     if restored is None:
-        return {"percentage": None, "lost_units": None, "created_units": denominator,
-                "unit": "word", "reason": "Recovery did not produce a verified restored artifact."}
-    retained = Counter(_word_delta(before, restored))
-    lost = sum(max(0, count - retained[word]) for word, count in Counter(introduced).items())
-    return {"percentage": round(100 * lost / denominator, 4), "lost_units": lost,
-            "created_units": denominator, "unit": "word"}
+        return {**base, "percentage": None, "lost_units": None, "created_units": denominator,
+                "reason": "Recovery did not produce a verified restored artifact."}
+    baseline_counts = Counter(token.casefold() for token in baseline_tokens)
+    restored_counts = Counter(token.casefold() for token in _WORD.findall(restored))
+    restored_surplus = Counter({token: max(0, count - baseline_counts[token])
+                                for token, count in restored_counts.items()})
+    retained = sum(min(count, restored_surplus[token]) for token, count in introduced.items())
+    lost = max(0, denominator - retained)
+    return {**base, "percentage": round(100 * lost / denominator, 4),
+            "lost_units": lost, "created_units": denominator, "retained_units": retained}
 
 
 def _mean(values: list[float]) -> float | None:
@@ -127,14 +150,33 @@ def _run_trial(*, experiment_id: str, scenario: str, repetition: int, store: Any
     quality_data = quality.to_dict()
     reasons = list(quality.reasons)
     decision = quality.decision.value
+    oracle_safe, oracle_reasons, oracle_score = assess_candidate({"draft": candidate["draft"]})
+    reasons.extend(reason for reason in oracle_reasons if reason not in reasons)
+    if not oracle_safe:
+        if any(reason.startswith("POLICY_MARKER_DETECTED") for reason in oracle_reasons):
+            decision = "reject"
+        elif decision == "accept":
+            decision = "needs_human_review"
+    quality_data = {**quality_data, "decision": decision,
+                    "reasons": list(dict.fromkeys(reasons)),
+                    "deterministic_oracle": {"safe": oracle_safe, "score": oracle_score,
+                                             "reasons": oracle_reasons}}
     factuality: dict[str, Any] | None = None
     if scenario == "unsupported_claim":
         if factuality_enabled and factuality_model and provider is not None and retrieval is not None:
+            # Synthetic oracle evidence makes this controlled scenario evaluable. It is
+            # deliberately scoped to this trial and recorded in the trial report.
+            add_evidence = getattr(retrieval, "add", None)
+            if callable(add_evidence):
+                add_evidence(
+                    "DraftGuard stores checkpoint artifacts in Git and uses MySQL for checkpoint metadata and audit records. The supplied project evidence does not state that user passwords are stored in a public database.",
+                    task_id=task_id, kind="evidence", reference_id=f"{task_id}:synthetic-storage-evidence")
             factuality = EvidenceFactualityEvaluator(provider, factuality_model, retrieval).evaluate(
                 "State what evidence establishes about DraftGuard storage.", candidate["draft"], task_id=task_id)
             quality = evaluator.combine_factuality(quality, factuality)
             quality_data = quality.to_dict()
             decision = quality.decision.value
+            reasons = list(quality.reasons)
         else:
             factuality = {"status": "not_run", "reason": "Factuality model or evidence adapter is not configured."}
             decision = "not_measured"
@@ -201,8 +243,12 @@ def _run_trial(*, experiment_id: str, scenario: str, repetition: int, store: Any
                            rollback_triggered)
     post_quality = evaluator.evaluate("Explain the controlled DraftGuard recovery scenario.",
                                       str((restored_state or {}).get("draft", ""))).to_dict() if recovered else None
+    if post_quality is not None:
+        post_quality["passes_quality_policy"] = post_quality.get("decision") == "accept"
+        post_quality["integrity_verified"] = bool(recovered)
     baseline_quality = evaluator.evaluate("Explain the controlled DraftGuard recovery scenario.",
                                           BASELINE_DRAFT).to_dict()
+    baseline_quality["passes_quality_policy"] = baseline_quality.get("decision") == "accept"
     false_trigger = scenario == "healthy_candidate" and rollback_triggered
     expected_recovery = ground_truth_warrants_recovery and expected_restore_possible
     outcome = ("expected" if (recovered == expected_recovery and
@@ -282,8 +328,11 @@ def run_experiment(output_path: str | Path, repetitions: int = 3, *,
     healthy = [r for r in trials if r["scenario"] == "healthy_candidate"]
     post_quality = [r["post_recovery_quality_score"] for r in successful if r["post_recovery_quality_score"] is not None]
     latencies = [float(r["rollback_latency_ms"]) for r in attempted]
-    lost_numerator = sum(r["lost_work"]["lost_units"] or 0 for r in trials if r["lost_work_percentage"] is not None)
-    lost_denominator = sum(r["lost_work"]["created_units"] or 0 for r in trials if r["lost_work_percentage"] is not None)
+    # Lost-work is defined for rollback attempts only. Healthy controls are not
+    # included in the denominator because their new work was never rolled back.
+    lost_work_trials = [r for r in trials if r["rollback_triggered"] and r["lost_work_percentage"] is not None]
+    lost_numerator = sum(r["lost_work"]["lost_units"] or 0 for r in lost_work_trials)
+    lost_denominator = sum(r["lost_work"]["created_units"] or 0 for r in lost_work_trials)
     p95_reason = None if len(latencies) >= 20 else "P95 is withheld for fewer than 20 rollback attempts."
     metrics = {
         "recovery_success_rate": {"value": round(len(successful) / len(recoverable_attempts), 4) if recoverable_attempts else None,
@@ -296,16 +345,18 @@ def run_experiment(output_path: str | Path, repetitions: int = 3, *,
             "definition": "Elapsed time from restore call start through integrity-verified state materialization."},
         "lost_work_percentage": {"value": round(100 * lost_numerator / lost_denominator, 4) if lost_denominator else None, "unit": "%",
             "numerator": lost_numerator, "denominator": lost_denominator,
-            "work_unit": "word", "definition": "Post-checkpoint words lost divided by post-checkpoint words created; zero or unavailable instrumentation is omitted."},
+            "work_unit": "word_token", "definition": "Candidate word tokens inserted/replaced after the baseline that are absent from the restored artifact, divided by candidate word tokens inserted/replaced; this is a lexical proxy, not a semantic measure."},
         "false_rollback_trigger_rate": {"value": round(sum(bool(r["false_rollback"]) for r in healthy) / len(healthy), 4) if healthy else None,
             "numerator": sum(bool(r["false_rollback"]) for r in healthy), "denominator": len(healthy),
             "definition": "Unnecessary rollback triggers divided by pre-labeled healthy negative-control trials."},
         "post_recovery_quality": {"value": _mean(post_quality), "unit": "quality points / 100",
             "numerator": len(post_quality), "denominator": len(successful),
+            "accepted_count": sum(bool(r.get("post_recovery_quality", {}).get("passes_quality_policy")) for r in successful),
+            "accepted_rate": (sum(bool(r.get("post_recovery_quality", {}).get("passes_quality_policy")) for r in successful) / len(successful)) if successful else None,
             "baseline_mean": _mean([r["baseline_quality"].get("quality_score_percent", 0) for r in successful]),
             "delta_from_baseline": (round(_mean(post_quality) - _mean([r["baseline_quality"].get("quality_score_percent", 0) for r in successful]), 4)
                                     if post_quality and successful else None),
-            "definition": "Configured deterministic quality evaluator score on verified restored content; compared with its approved baseline."},
+            "definition": "Configured deterministic quality score on integrity-verified restored content; also reports whether restored content passes the configured policy. This heuristic score is not a factuality proof."},
     }
     finished_at = datetime.now(timezone.utc).isoformat()
     status = "completed" if all(r["outcome"] in {"expected", "expected_fallback", "expected_fail_closed", "unmeasured"} for r in trials) else "completed_with_failures"
@@ -335,7 +386,7 @@ def run_experiment(output_path: str | Path, repetitions: int = 3, *,
                   "Git artifact repositories are isolated per scenario when artifact_root is supplied.",
                   "SQLite is used only by the unit/CLI harness when no metadata_store is injected; API runtime injects configured SQL storage.",
                   "Unsupported-claim trial is unmeasured if factuality evaluation is not configured.",
-                  "Lost work uses word-level sequence differences; a zero denominator is unavailable.",
+                  "Lost work uses candidate-to-restored token alignment for inserted/replaced post-checkpoint word tokens; this is a lexical proxy, and a zero denominator is unavailable.",
                   "P95 latency is reported only with at least 20 measured rollback attempts."],
         "trials": trials,
     }

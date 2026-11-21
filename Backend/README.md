@@ -95,7 +95,7 @@ The `is_safe` flag is supplied by the caller in this step. It is not an AI safet
 
 The current UI includes the writing workspace, a reserved demo setup action, service checks, checkpoint inspection, test and factuality diagnostics, and recovery experiment history. `POST /api/demo/load` idempotently creates/reuses the reserved demo task and indexes its fixed source; it does not generate, approve, or restore content. Factuality results include claim-level retrieval diagnostics and source references. The deterministic Chroma adapter defaults to a 0.30 cosine-similarity cutoff and also requires meaningful-token overlap to reject feature-hash collisions. The demo's related claim queries pass while its unrelated control query is filtered; recalibrate retrieval for a different corpus. Empty claim extraction or evaluator failure is reported as unscored/failed.
 
-`POST /api/evaluations/run` runs labelled synthetic failure scenarios using an isolated Git artifact repository and persists the measured report in the configured metadata SQL store. `GET /api/evaluations/runs` lists historical runs and `GET /api/evaluations/runs/{run_id}/report` returns the JSON report. The five metrics are recovery success rate, rollback latency (mean/median and p95 only with at least 20 samples), lost-work character proxy, false rollback rate against labelled healthy controls, and post-recovery quality from the real deterministic `QualityPolicyEvaluator`. Each metric has a denominator and unavailable reason where applicable; synthetic scenario output must not be described as a live failure rate.
+`POST /api/evaluations/run` runs labelled synthetic failure scenarios using an isolated Git artifact repository and persists the measured report in the configured metadata SQL store. `GET /api/evaluations/runs` lists historical runs and `GET /api/evaluations/runs/{run_id}/report` returns the JSON report. The five metrics are recovery success rate, rollback latency (mean/median and p95 only with at least 20 samples), lost-work word-token alignment proxy, false rollback rate against labelled healthy controls, and post-recovery quality from the real deterministic `QualityPolicyEvaluator`. Each metric has a denominator and unavailable reason where applicable; synthetic scenario output must not be described as a live failure rate.
 
 `POST /api/diagnostics/tests` invokes a fixed pytest command with temporary SQLite test data. SQLite here is explicitly isolated test infrastructure; the running application remains configured for MySQL and does not fall back. `POST /api/diagnostics/factuality` runs a fixed smoke benchmark against a temporary Chroma collection and an installed local Ollama model. It does not test a task's evidence. Report automated suite results, live MySQL/Chroma probes, benchmark results, and full-stack workflow results separately.
 
@@ -288,7 +288,7 @@ uses `AGENT_EVALUATION_DB`, defaulting to `runtime_data/evaluation_api.sqlite3`.
 | GET | `/api/tasks/{task_id}` | Task metadata and latest safe state |
 | GET | `/api/tasks/{task_id}/checkpoints` | Checkpoint history |
 | GET | `/api/checkpoints/{checkpoint_id}` | Checkpoint metadata, snapshot, and integrity status |
-| POST | `/api/checkpoints/{checkpoint_id}/rollback` | Roll back the task to its latest verified safe checkpoint |
+| POST | `/api/checkpoints/{checkpoint_id}/rollback` | Restore this exact checkpoint only if it is safe and integrity-verified |
 | POST | `/api/tasks/{task_id}/rollback` | Roll back a task to its latest verified safe checkpoint |
 | POST | `/api/evaluations/run` | Run deterministic Step 2 experiments |
 | GET | `/api/tasks/{task_id}/events` | Audit event history |
@@ -325,9 +325,11 @@ Run five repetitions per deterministic scenario:
   events are persisted in MySQL. SQLite is used explicitly for isolated development
   and test runs; it does not silently replace MySQL in deployment mode.
 - `/api/checkpoints/{checkpoint_id}/rollback` identifies the task from the requested
-  checkpoint and invokes the safe rollback policy. The runtime selects the latest
-  verified safe checkpoint for that task; it does not promise arbitrary historical
-  restore to an unsafe or older snapshot.
+  checkpoint and restores that exact checkpoint only when it is marked safe and its
+  metadata snapshot and recorded Git artifact both pass integrity checks. Pending,
+  rejected, corrupt, missing, or cross-task targets fail closed.
+- `/api/tasks/{task_id}/rollback` retains latest-verified-safe behavior and is useful
+  when the caller does not need to choose a specific historical version.
 - `/api/checkpoints/{checkpoint_id}` returns the snapshot state only when its digest
   verifies. Treat this endpoint as sensitive local project data.
 - The API has no authentication or user/tenant isolation and is intended for a
@@ -468,3 +470,8 @@ semantic accuracy or agreement with human reviewers.
 Set `AGENT_FACTUALITY_EVALUATION=1` and optionally `AGENT_FACTUALITY_MODEL=qwen3:4b` before starting the API. Add manually verified source passages through `POST /api/tasks/{task_id}/evidence` before generation. The factuality evaluator extracts claims, retrieves task-scoped evidence records, verifies claims against those records, and records claim verdicts/evidence in the checkpoint and audit event. A contradicted claim is rejected; insufficient evidence or evaluation errors require human review. This is a lightweight FASTFACT-inspired adaptation, not a reproduction of the paper. See the repository root README for the request example and limitations.
 
 The Ollama adapter sends the semantic and factuality evaluator calls with JSON-schema-constrained output. The evaluators still validate every returned field and fail closed if a model or Ollama version does not satisfy the schema. In the UI, an evaluation error is shown as **Failed** and the candidate remains in human review; it is never displayed as a successful factuality result.
+
+
+## Continuing from the last approved draft
+
+The writing UI includes **Continue from last approved draft** (enabled by default). When enabled, a generation request loads only the latest integrity-verified safe checkpoint for the same task and passes its non-empty draft to the local model as editable working memory. The model is instructed to revise the existing draft, preserve unaffected material, and apply the new request. The prior draft is not treated as independent factual evidence. Unreviewed/rejected candidates are not used as the baseline. The selected baseline checkpoint ID and inclusion status are recorded in the generated checkpoint's `execution_context` and audit event. Disable the checkbox to start without the prior approved draft. This is task-scoped checkpoint memory, not unrestricted chat-history memory.

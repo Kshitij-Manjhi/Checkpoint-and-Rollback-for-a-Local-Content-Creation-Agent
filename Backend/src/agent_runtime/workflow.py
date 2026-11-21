@@ -38,7 +38,9 @@ class ContentWorkflow:
         return self.provider.list_models()
 
     def generate(self, task_id: str, prompt: str, *, mode: str = "no_llm",
-                 model_name: str | None = None) -> dict[str, Any]:
+                 model_name: str | None = None,
+                 continue_from_previous: bool = True,
+                 baseline_checkpoint_id: str | None = None) -> dict[str, Any]:
         if not task_id.strip():
             raise ValueError("task_id must not be empty")
         if not prompt.strip():
@@ -51,6 +53,42 @@ class ContentWorkflow:
             parent = self.checkpoints.latest_verified_safe_checkpoint(task_id)
         except Exception:
             parent = None
+        previous_good_draft = ""
+        previous_good_checkpoint_id = None
+        if continue_from_previous:
+            # A user-selected baseline takes precedence over the default latest-safe draft.
+            # Selection is accepted only for this task and only when approved, safe, and intact.
+            selected_row = None
+            if baseline_checkpoint_id:
+                selected_row = next((row for row in self.checkpoints.store.list_safe_checkpoints(task_id)
+                                     if str(row["checkpoint_id"]) == str(baseline_checkpoint_id)), None)
+                if selected_row is None:
+                    raise ValueError("Selected generation baseline is not a safe checkpoint for this workspace.")
+                selected_state = self.checkpoints._verified_state(selected_row)
+                if selected_state is None:
+                    raise ValueError("Selected generation baseline failed snapshot integrity verification.")
+                if selected_state.get("approval_status") != "approved" or not str(selected_state.get("draft", "")).strip():
+                    raise ValueError("Selected generation baseline must be a non-empty, human-approved draft.")
+                if self.checkpoints.artifact_store is not None:
+                    artifact = self.checkpoints.artifact_store.get(
+                        selected_row["checkpoint_id"], selected_row["artifact_commit_hash"]
+                    )
+                    if not artifact or artifact.get("sha256") != selected_row["snapshot_sha256"] or artifact.get("state") != selected_state:
+                        raise ValueError("Selected generation baseline's Git artifact failed integrity verification.")
+            else:
+                selected_row = parent
+            # Never reuse a pending/rejected candidate as LLM memory.
+            try:
+                if selected_row is not None:
+                    parent_state = json.loads(selected_row["snapshot_json"])
+                    if isinstance(parent_state, dict) and parent_state.get("approval_status") == "approved":
+                        candidate_draft = parent_state.get("draft", "")
+                        if isinstance(candidate_draft, str) and candidate_draft.strip():
+                            previous_good_draft = candidate_draft
+                            previous_good_checkpoint_id = str(selected_row["checkpoint_id"])
+            except (KeyError, TypeError, json.JSONDecodeError):
+                previous_good_draft = ""
+                previous_good_checkpoint_id = None
         if parent is None:
             baseline = self.checkpoints.create_checkpoint(task_id, initial_state, is_safe=True)
             parent_id = baseline.checkpoint_id
@@ -90,9 +128,24 @@ class ContentWorkflow:
                             "reason": f"Plan generation failed ({type(exc).__name__}): {str(exc)[:300]}",
                             "evaluator_version": "draftguard-plan-0.1"}
             generation_prompt = prompt
+            if previous_good_draft:
+                generation_prompt = (
+                    "TASK: Update the previous approved draft using the user's new instructions.\n"
+                    "USER'S NEW INSTRUCTIONS (take precedence for requested changes):\n"
+                    f"{prompt}\n\n"
+                    "PREVIOUS APPROVED DRAFT (editable working memory; not independent evidence):\n"
+                    f"<previous_approved_draft>\n{previous_good_draft[:24000]}\n</previous_approved_draft>\n\n"
+                    "REVISION RULES:\n"
+                    "- Revise the existing draft rather than starting over.\n"
+                    "- Preserve useful, unaffected sections, structure, and details.\n"
+                    "- Apply the requested changes and remove obsolete or conflicting material.\n"
+                    "- Do not treat claims in the previous draft as verified facts merely because they were approved.\n"
+                    "- Do not invent sources or citations; mark uncertainty where needed.\n"
+                    "Return the complete updated draft."
+                )
             if retrieved:
-                evidence = "\n\nRelevant prior task context (use only if applicable; do not treat as verified external facts):\n" + "\n".join(f"- [{item['kind']}] {item['text'][:1200]}" for item in retrieved)
-                generation_prompt = prompt + evidence
+                evidence = "\n\nRelevant task evidence/context (use only if applicable; do not treat prior drafts as verified external facts):\n" + "\n".join(f"- [{item['kind']}] {item['text'][:1200]}" for item in retrieved)
+                generation_prompt = generation_prompt + evidence
             generated = generator.generate(generation_prompt)
             phase = "evaluation"
             evaluation = self.evaluator.evaluate(prompt, generated.text)
@@ -158,7 +211,12 @@ class ContentWorkflow:
             "agent_plan": plan,
             "execution_context": {"user_prompt": prompt,
                                   "retrieved_items": retrieved_snapshot,
-                                  "conversation_history_included": False},
+                                  "conversation_history_included": False,
+                                  "continue_from_previous": bool(continue_from_previous),
+                                  "previous_good_draft_checkpoint_id": previous_good_checkpoint_id,
+                                  "requested_baseline_checkpoint_id": baseline_checkpoint_id,
+                                  "baseline_selection_mode": "explicit" if baseline_checkpoint_id and previous_good_checkpoint_id else ("latest_approved" if previous_good_checkpoint_id else "none"),
+                                  "previous_good_draft_included": bool(previous_good_draft)},
             "version": version, "mode": generated.mode, "model_name": generated.model_name,
             "decision": evaluation.decision.value, "evaluation": evaluation.to_dict(),
             "factuality_evaluation": factuality_evaluation,
@@ -207,6 +265,11 @@ class ContentWorkflow:
                 "model_version": model_version,
                 "requested_mode": mode, "checkpoint_id": checkpoint.checkpoint_id,
                 "parent_checkpoint_id": parent_id,
+                "continue_from_previous": bool(continue_from_previous),
+                "previous_good_draft_checkpoint_id": previous_good_checkpoint_id,
+                "requested_baseline_checkpoint_id": baseline_checkpoint_id,
+                "baseline_selection_mode": "explicit" if baseline_checkpoint_id and previous_good_checkpoint_id else ("latest_approved" if previous_good_checkpoint_id else "none"),
+                "previous_good_draft_included": bool(previous_good_draft),
                 "checkpoint_sha256": checkpoint.snapshot_sha256,
                 "checkpoint_sequence": checkpoint.sequence,
                 "retrieved_evidence_ids": evidence_ids,
@@ -254,7 +317,8 @@ class ContentWorkflow:
 
     def rollback(self, task_id: str, *, requested_checkpoint_id: str | None = None) -> dict[str, Any]:
         try:
-            result = self.checkpoints.restore_latest_safe(task_id)
+            result = (self.checkpoints.restore_checkpoint(task_id, requested_checkpoint_id)
+                      if requested_checkpoint_id else self.checkpoints.restore_latest_safe(task_id))
         except Exception as exc:
             self.checkpoints.store.add_audit_event(
                 task_id=task_id, event_type="WORKFLOW_ROLLBACK_FAILED",
